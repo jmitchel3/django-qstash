@@ -41,17 +41,95 @@ urls.Documentation = "https://github.com/jmitchel3/django-qstash"
 urls.Funding = "https://github.com/jmitchel3/django-qstash"
 urls.Repository = "https://github.com/jmitchel3/django-qstash"
 
-[tool.isort]
-add_imports = [
-  "from __future__ import annotations",
+[tool.ruff]
+# line-length = 226
+lint.select = [
+  "AIR",   # Airflow
+  "ASYNC", # flake8-async
+  "B",     # flake8-bugbear
+  "C4",    # flake8-comprehensions
+  "C90",   # McCabe cyclomatic complexity
+  "DJ",    # flake8-django
+  "DTZ",   # flake8-datetimez
+  "E",     # pycodestyle
+  "EXE",   # flake8-executable
+  "F",     # Pyflakes
+  "FA",    # flake8-future-annotations
+  "FAST",  # FastAPI
+  "FIX",   # flake8-fixme
+  "FLY",   # flynt
+  "FURB",  # refurb
+  "G",     # flake8-logging-format
+  "I",     # isort
+  "ICN",   # flake8-import-conventions
+  "INP",   # flake8-no-pep420
+  "INT",   # flake8-gettext
+  "ISC",   # flake8-implicit-str-concat
+  "LOG",   # flake8-logging
+  "N",     # pep8-naming
+  "NPY",   # NumPy-specific rules
+  "PD",    # pandas-vet
+  "PERF",  # Perflint
+  "PGH",   # pygrep-hooks
+  "PIE",   # flake8-pie
+  "PL",    # Pylint
+  "PT",    # flake8-pytest-style
+  "PTH",   # flake8-use-pathlib
+  "PYI",   # flake8-pyi
+  "RSE",   # flake8-raise
+  "S",     # flake8-bandit
+  "SIM",   # flake8-simplify
+  "SLF",   # flake8-self
+  "SLOT",  # flake8-slots
+  "T10",   # flake8-debugger
+  "TD",    # flake8-todos
+  "TID",   # flake8-tidy-imports
+  "UP",    # pyupgrade
+  "W",     # pycodestyle
+  "YTT",   # flake8-2020
+  # "A",    # flake8-builtins
+  # "ANN",  # flake8-annotations
+  # "ARG",  # flake8-unused-arguments
+  # "BLE",  # flake8-blind-except
+  # "COM",  # flake8-commas
+  # "CPY",  # flake8-copyright
+  # "D",    # pydocstyle
+  # "DOC",  # pydoclint
+  # "EM",   # flake8-errmsg
+  # "ERA",  # eradicate
+  # "FBT",  # flake8-boolean-trap
+  # "Q",    # flake8-quotes
+  # "RET",  # flake8-return
+  # "RUF",  # Ruff-specific rules
+  # "T20",  # flake8-print
+  # "TC",   # flake8-type-checking
+  # "TRY",  # tryceratops
 ]
-force_single_line = true
-profile = "black"
-src_paths = [
-  ".",
-  "example",
-  "src",
+lint.ignore = [
+  "B904",  # raise-without-from-inside-except
+  "DJ001", # django-nullable-model-string-field
+  "DJ008", # django-model-without-dunder-str
+  "E501",  # line-too-long
+  "PT006", # pytest-parametrize-names-wrong-type
+  "PT009", # pytest-unittest-assertion
+  "PT011", # pytest-raises-too-broad
+  "PT017", # pytest-assert-in-except
 ]
+lint.per-file-ignores."__init__.py" = [ "E402" ]
+lint.per-file-ignores."sample_project/*" = [ "F401" ]
+lint.per-file-ignores."sample_project/cfehome/tasks.py" = [ "PTH123" ]
+lint.per-file-ignores."src/django_qstash/discovery/utils.py" = [ "PERF203" ]
+lint.per-file-ignores."src/django_qstash/management/commands/task_schedules.py" = [ "N806", "PERF203" ]
+lint.per-file-ignores."src/django_qstash/results/tasks.py" = [ "N806" ]
+lint.per-file-ignores."src/django_qstash/schedules/validators.py" = [ "S308" ]
+lint.per-file-ignores."tests/*" = [ "S101" ]
+lint.per-file-ignores."tests/settings.py" = [ "S105" ]
+lint.per-file-ignores."tests/test_settings.py" = [ "S106", "SIM117" ]
+lint.isort.force-single-line = true
+lint.mccabe.max-complexity = 13 # default is 10
+lint.pylint.allow-magic-value-types = [ "int", "str" ]
+lint.pylint.max-args = 9 # default is 5
+lint.pylint.max-branches = 15 # default is 12
 
 [tool.pyproject-fmt]
 max_supported_python = "3.13"

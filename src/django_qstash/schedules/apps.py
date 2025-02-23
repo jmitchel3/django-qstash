@@ -10,4 +10,4 @@ class SchedulesConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
 
     def ready(self):
-        import django_qstash.schedules.signals  # noqa
+        import django_qstash.schedules.signals  # noqa: F401

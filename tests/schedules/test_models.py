@@ -171,9 +171,9 @@ def test_task_schedule_validation(db, timeout, retries, expected_valid):
     try:
         schedule.full_clean()  # This will trigger all validators
         schedule.save()
-        assert (
-            expected_valid
-        ), f"Expected validation to fail for timeout={timeout}, retries={retries}"
+        assert expected_valid, (
+            f"Expected validation to fail for timeout={timeout}, retries={retries}"
+        )
     except ValidationError as e:
         assert not expected_valid, f"Unexpected validation error: {str(e)}"
 
