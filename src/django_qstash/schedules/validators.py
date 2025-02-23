@@ -63,7 +63,7 @@ def validate_cron_expression(value: str) -> None:
         "day_of_week": cron.day_of_week_re,
     }
 
-    for sub_value, (field, pattern) in zip(parts, patterns.items()):
+    for sub_value, (field, pattern) in zip(parts, patterns.items(), strict=True):
         if not re.match(pattern, sub_value):
             invalid_msg = f"""<b>{sub_value}</b> is not a valid {field_label[field]}. <br/>Must be in range {field_descriptions[field]}. <br/><a target="_blank" href="https://crontab.guru/">crontab.guru</a> is also helpful."""
             raise InvalidCronStringValidationError(mark_safe(invalid_msg))

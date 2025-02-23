@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import warnings
-from functools import lru_cache
+from functools import cache
 from importlib import import_module
 
 from django.apps import apps
@@ -18,7 +18,7 @@ DJANGO_QSTASH_DISCOVER_INCLUDE_SETTINGS_DIR = getattr(
 )
 
 
-@lru_cache(maxsize=None)
+@cache
 def discover_tasks(locations_only: bool = False) -> list[str] | list[dict]:
     """
     Automatically discover tasks in Django apps and return them as a list of tuples.
@@ -35,12 +35,12 @@ def discover_tasks(locations_only: bool = False) -> list[str] | list[dict]:
     from django_qstash.app import QStashTask
 
     discovered_tasks = []
-    packages = []
-
-    # Add Django apps that contain tasks.py
-    for app_config in apps.get_app_configs():
-        if module_has_submodule(app_config.module, "tasks"):
-            packages.append(app_config.name)
+    # Django apps that contain tasks.py
+    packages = [
+        app_config.name
+        for app_config in apps.get_app_configs()
+        if module_has_submodule(app_config.module, "tasks")
+    ]
 
     # Add the directory containing settings.py if it has a tasks.py module
     if DJANGO_QSTASH_DISCOVER_INCLUDE_SETTINGS_DIR:

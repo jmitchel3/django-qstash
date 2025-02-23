@@ -18,7 +18,7 @@ def create_task_result():
     def _create_task_result(task_id, age=None, status=TaskStatus.SUCCESS):
         date_done = timezone.now()
         if age:
-            if isinstance(age, (int, float)):
+            if isinstance(age, int | float):
                 date_done -= timedelta(seconds=age)
             else:
                 date_done -= age

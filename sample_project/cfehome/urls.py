@@ -11,7 +11,7 @@ from . import views
 urlpatterns = [
     path("", views.index),
     path("admin/", admin.site.urls),
-    path('', include('notifications.urls')),
+    path("", include("notifications.urls")),
     path("qstash/webhook/", include("django_qstash.urls")),
 ]
 

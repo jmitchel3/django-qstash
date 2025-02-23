@@ -63,4 +63,3 @@ def delete_task_schedule_from_qstash(instance: TaskSchedule) -> None:
         qstash_client.schedule.delete(instance.schedule_id)
     except Exception:
         logger.exception("Failed to delete schedule %s", instance.schedule_id)
-    return

@@ -1,6 +1,7 @@
 import pytest
 
-from django_qstash.utils import import_string, validate_task_payload
+from django_qstash.utils import import_string
+from django_qstash.utils import validate_task_payload
 
 
 def test_import_string():
