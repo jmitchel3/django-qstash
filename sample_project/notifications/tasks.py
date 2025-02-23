@@ -1,7 +1,12 @@
-from django_qstash import shared_task
+from __future__ import annotations
+
 import json
-from django.core.mail import send_mail
+
 from django.conf import settings
+from django.core.mail import send_mail
+
+from django_qstash import shared_task
+
 
 @shared_task
 def send_welcome_notification(user_email):
@@ -16,20 +21,20 @@ def send_welcome_notification(user_email):
         #     [user_email],
         #     fail_silently=False,
         # )
-        
-        return json.dumps({
-            "status": "success",
-            "email": user_email,
-            "type": "welcome",
-            "message": "Welcome email sent successfully"
-        })
+
+        return json.dumps(
+            {
+                "status": "success",
+                "email": user_email,
+                "type": "welcome",
+                "message": "Welcome email sent successfully",
+            }
+        )
     except Exception as e:
-        return json.dumps({
-            "status": "error",
-            "email": user_email,
-            "type": "welcome",
-            "error": str(e)
-        })
+        return json.dumps(
+            {"status": "error", "email": user_email, "type": "welcome", "error": str(e)}
+        )
+
 
 @shared_task
 def send_reminder_notification(user_email):
@@ -44,17 +49,21 @@ def send_reminder_notification(user_email):
         #     [user_email],
         #     fail_silently=False,
         # )
-        
-        return json.dumps({
-            "status": "success",
-            "email": user_email,
-            "type": "reminder",
-            "message": "Reminder sent successfully"
-        })
+
+        return json.dumps(
+            {
+                "status": "success",
+                "email": user_email,
+                "type": "reminder",
+                "message": "Reminder sent successfully",
+            }
+        )
     except Exception as e:
-        return json.dumps({
-            "status": "error",
-            "email": user_email,
-            "type": "reminder",
-            "error": str(e)
-        })
+        return json.dumps(
+            {
+                "status": "error",
+                "email": user_email,
+                "type": "reminder",
+                "error": str(e),
+            }
+        )
