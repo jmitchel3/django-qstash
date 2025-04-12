@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
-from typing import Callable
 
 from django_qstash.app.base import QStashTask
 
