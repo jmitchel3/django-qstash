@@ -51,9 +51,9 @@ def test_task_schedule_form_validation(valid_form_data, field, value, expected_v
     form = TaskScheduleForm(data=form_data)
 
     is_valid = form.is_valid()
-    assert (
-        is_valid == expected_valid
-    ), f"Form validation for {field}={value} failed. Errors: {form.errors}"
+    assert is_valid == expected_valid, (
+        f"Form validation for {field}={value} failed. Errors: {form.errors}"
+    )
 
 
 def test_task_schedule_form_json_fields(valid_form_data):
@@ -78,6 +78,6 @@ def test_task_name_auto_population(valid_form_data):
     form = TaskScheduleForm(data=form_data)
     assert form.is_valid(), f"Form validation failed. Errors: {form.errors}"
     assert form.cleaned_data["task"] == form_data["task"], "Task field mismatch"
-    assert (
-        form.cleaned_data["task_name"] == form.cleaned_data["task"]
-    ), "Task name not auto-populated"
+    assert form.cleaned_data["task_name"] == form.cleaned_data["task"], (
+        "Task name not auto-populated"
+    )
