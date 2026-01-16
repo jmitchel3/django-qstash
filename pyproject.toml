@@ -42,6 +42,19 @@ urls.Documentation = "https://github.com/jmitchel3/django-qstash"
 urls.Funding = "https://github.com/jmitchel3/django-qstash"
 urls.Repository = "https://github.com/jmitchel3/django-qstash"
 
+[dependency-groups]
+dev = [
+  "bump2version",
+  "coverage",
+  "django-stubs",
+  "mypy",
+  "pre-commit",
+  "pytest",
+  "pytest-django",
+  "python-decouple",
+  "types-requests",
+]
+
 [tool.isort]
 add_imports = [
   "from __future__ import annotations",

@@ -77,9 +77,8 @@ repos:
   hooks:
   - id: makemigrations
     name: Run makemigrations on sample_project
-    entry: bash -c 'source venv/bin/activate && cd sample_project && python manage.py makemigrations --check --dry-run'
+    entry: bash -c 'cd sample_project && uv run python manage.py makemigrations --check --dry-run'
     language: system
     pass_filenames: false
     always_run: true
     require_serial: true
-    deps: ['install-locally']
