@@ -18,8 +18,8 @@ scripts:
     - venv/bin/bump2version patch
   bump_and_push_release:
     - venv/bin/bump2version patch
-    - venv/bin/git push origin main
-    - venv/bin/git push origin main --tags
+    - git push origin main
+    - git push origin main --tags
   makemigrations:
     - cd sample_project && ../venv/bin/python manage.py makemigrations
     - ../venv/bin/python manage.py migrate
