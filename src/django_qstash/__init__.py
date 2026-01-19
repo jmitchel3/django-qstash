@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-__version__ = "0.2.2"
+__version__ = "0.2.3"
 
 from django_qstash.app import shared_task
 from django_qstash.app import stashed_task
