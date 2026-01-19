@@ -8,6 +8,20 @@ import tempfile
 from functools import partial
 from pathlib import Path
 
+
+def load_django_constraints(path: Path) -> dict[str, str]:
+    constraints: dict[str, str] = {}
+    for line in path.read_text().splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "=" not in stripped:
+            raise ValueError(f"Invalid constraint line: {line}")
+        key, constraint = stripped.split("=", 1)
+        constraints[key.strip()] = constraint.strip()
+    return constraints
+
+
 if __name__ == "__main__":
     os.chdir(Path(__file__).parent)
     common_args = [
@@ -23,13 +37,7 @@ if __name__ == "__main__":
 
     # Define Python versions and Django versions
     python_versions = ["3.10", "3.11", "3.12", "3.13", "3.14"]
-    django_versions = {
-        "42": "Django>=4.2a1,<5.0",
-        "50": "Django>=5.0a1,<5.1",
-        "51": "Django>=5.1a1,<5.2",
-        "52": "Django>=5.2.9,<5.3",
-        "60": "Django>=6.0a1,<6.1",
-    }
+    django_versions = load_django_constraints(Path("django-constraints.txt"))
 
     # Define the specific combinations to run
     # Format: (python_version, django_version)
