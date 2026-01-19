@@ -4,12 +4,14 @@ description: Rav is a shortcut to run commands on your local machine.
 scripts:
   install:
     - venv/bin/python3 -m pip install -e .
+  update_django_constraints:
+    - uv run python tests/requirements/update_django_constraints.py
   compile_test_requirements:
-    - venv/bin/python3 tests/requirements/compile.py
+    - uv run python tests/requirements/compile.py
   test:
-    - venv/bin/tox run -f py312
-    - venv/bin/coverage combine
-    - venv/bin/coverage report
+    - uv run tox run -f py312
+    - uv run coverage combine
+    - uv run coverage report
   sample_server:
     - cd sample_project && ../venv/bin/python manage.py runserver 8133
   sample_shell:
