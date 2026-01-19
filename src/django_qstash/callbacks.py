@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
 from django_qstash.settings import DJANGO_QSTASH_DOMAIN
@@ -16,6 +17,8 @@ def get_callback_url() -> str:
         raise ImproperlyConfigured("DJANGO_QSTASH_WEBHOOK_PATH is not set")
     callback_domain = DJANGO_QSTASH_DOMAIN.rstrip("/")
     if not callback_domain.startswith(("http://", "https://")):
-        callback_domain = f"https://{callback_domain}"
+        force_https = getattr(settings, "DJANGO_QSTASH_FORCE_HTTPS", True)
+        protocol = "https" if force_https else "http"
+        callback_domain = f"{protocol}://{callback_domain}"
     webhook_path = DJANGO_QSTASH_WEBHOOK_PATH.strip("/")
     return f"{callback_domain}/{webhook_path}/"
