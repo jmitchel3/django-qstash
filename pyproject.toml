@@ -6,7 +6,7 @@ requires = [
 
 [project]
 name = "django-qstash"
-version = "0.2.0"
+version = "0.2.1"
 description = "A drop-in replacement for Celery's shared_task with Upstash QStash."
 readme = "README.md"
 license = { file = "LICENSE" }
