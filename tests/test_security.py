@@ -198,11 +198,12 @@ class TestAuditLogging:
         )
         request = Mock(spec=HttpRequest)
         request.body = payload.encode()
-        request.headers = {"Upstash-Signature": "valid", "Upstash-Message-Id": "123"}
-        request.META = {
-            "HTTP_X_FORWARDED_FOR": "203.0.113.50, 70.41.3.18, 150.172.238.178",
-            "REMOTE_ADDR": "127.0.0.1",
+        request.headers = {
+            "Upstash-Signature": "valid",
+            "Upstash-Message-Id": "123",
+            "x-forwarded-for": "203.0.113.50, 70.41.3.18, 150.172.238.178",
         }
+        request.META = {"REMOTE_ADDR": "127.0.0.1"}
         request.build_absolute_uri.return_value = "https://example.com"
 
         with (
