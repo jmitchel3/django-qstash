@@ -29,6 +29,14 @@ def validate_domain(domain: str) -> str:
     if not domain:
         raise ImproperlyConfigured("DJANGO_QSTASH_DOMAIN cannot be empty")
 
+    # Check for invalid protocols (any protocol that's not http/https)
+    if "://" in domain and not domain.startswith(("http://", "https://")):
+        # Extract the protocol for the error message
+        protocol = domain.split("://")[0]
+        raise ImproperlyConfigured(
+            f"Invalid protocol in DJANGO_QSTASH_DOMAIN: {protocol}"
+        )
+
     # Add protocol if missing for parsing
     if not domain.startswith(("http://", "https://")):
         force_https = getattr(settings, "DJANGO_QSTASH_FORCE_HTTPS", True)
