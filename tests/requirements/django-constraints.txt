@@ -1,6 +1,5 @@
 # Format: key=Django>=min_version,<max_version
 42=Django>=4.2.27,<5.0
-50=Django>=5.0.14,<5.1
 51=Django>=5.1.15,<5.2
 52=Django>=5.2.10,<5.3
 60=Django>=6.0.1,<6.1
