@@ -6,7 +6,7 @@ requires = [
 
 [project]
 name = "django-qstash"
-version = "0.2.1"
+version = "0.2.2"
 description = "A drop-in replacement for Celery's shared_task with Upstash QStash."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -29,6 +29,7 @@ classifiers = [
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
   "Programming Language :: Python :: Implementation :: CPython",
 ]
 
@@ -68,7 +69,7 @@ src_paths = [
 ]
 
 [tool.pyproject-fmt]
-max_supported_python = "3.13"
+max_supported_python = "3.14"
 
 [tool.pytest.ini_options]
 addopts = """\
