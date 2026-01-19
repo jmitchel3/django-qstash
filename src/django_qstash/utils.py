@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 import importlib
 import logging
-from typing import Any, Tuple
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -17,10 +19,10 @@ def import_string(import_path: str) -> Any:
         module = importlib.import_module(module_path)
         return getattr(module, class_name)
     except (ImportError, AttributeError) as e:
-        raise ImportError(f"Could not import '{import_path}': {e}")
+        raise ImportError(f"Could not import '{import_path}': {e}") from e
 
 
-def validate_task_payload(payload: dict) -> Tuple[bool, str]:
+def validate_task_payload(payload: dict[str, Any]) -> tuple[bool, str]:
     """Validate the task payload has all required fields"""
     required_fields = {"function", "module", "args", "kwargs"}
     missing_fields = required_fields - set(payload.keys())

@@ -5,6 +5,8 @@ import os
 import warnings
 from functools import lru_cache
 from importlib import import_module
+from typing import Any
+from typing import TypedDict
 
 from django.apps import apps
 from django.conf import settings
@@ -13,29 +15,28 @@ from django.utils.module_loading import module_has_submodule
 
 logger = logging.getLogger(__name__)
 
-DJANGO_QSTASH_DISCOVER_INCLUDE_SETTINGS_DIR = getattr(
+DJANGO_QSTASH_DISCOVER_INCLUDE_SETTINGS_DIR: bool = getattr(
     settings, "DJANGO_QSTASH_DISCOVER_INCLUDE_SETTINGS_DIR", True
 )
 
 
-@lru_cache(maxsize=None)
-def discover_tasks(locations_only: bool = False) -> list[str] | list[dict]:
-    """
-    Automatically discover tasks in Django apps and return them as a list of tuples.
-    Each tuple contains (dot_notation_path, task_name).
-    If no custom task name is specified, both values will be the dot notation path.
+class TaskInfo(TypedDict):
+    """Type definition for task discovery result."""
 
-    Returns:
-        List of tuples: [(dot_notation_path, task_name), ...]
-        Example: [
-            ('example_app.tasks.my_task', 'example_app.tasks.my_task'),
-            ('other_app.tasks.custom_task', 'special_name')
-        ]
+    name: str | None
+    field_label: str
+    location: str
+
+
+@lru_cache(maxsize=None)
+def _discover_tasks_impl() -> list[TaskInfo]:
+    """
+    Internal implementation that returns the full task info list.
     """
     from django_qstash.app import QStashTask
 
-    discovered_tasks = []
-    packages = []
+    discovered_tasks: list[TaskInfo] = []
+    packages: list[str] = []
 
     # Add Django apps that contain tasks.py
     for app_config in apps.get_app_configs():
@@ -73,11 +74,11 @@ def discover_tasks(locations_only: bool = False) -> list[str] | list[dict]:
                     else:
                         label = f"{attr.name} ({package}.tasks)"
                     discovered_tasks.append(
-                        {
-                            "name": attr.name,
-                            "field_label": label,
-                            "location": f"{package}.tasks.{attr_name}",
-                        }
+                        TaskInfo(
+                            name=attr.name,
+                            field_label=label,
+                            location=f"{package}.tasks.{attr_name}",
+                        )
                     )
         except Exception as e:
             warnings.warn(
@@ -85,14 +86,38 @@ def discover_tasks(locations_only: bool = False) -> list[str] | list[dict]:
                 RuntimeWarning,
                 stacklevel=2,
             )
-    if locations_only:
-        return [x["location"] for x in discovered_tasks]
     return discovered_tasks
 
 
-def clear_discover_tasks_cache(sender, **kwargs):
+def discover_tasks(locations_only: bool = False) -> list[str] | list[TaskInfo]:
+    """
+    Automatically discover tasks in Django apps and return them as a list.
+
+    Args:
+        locations_only: If True, returns a list of location strings.
+                       If False, returns a list of TaskInfo dicts.
+
+    Returns:
+        If locations_only is True: List of location strings
+        If locations_only is False: List of TaskInfo dicts
+        Example: [
+            ('example_app.tasks.my_task', 'example_app.tasks.my_task'),
+            ('other_app.tasks.custom_task', 'special_name')
+        ]
+    """
+    tasks = _discover_tasks_impl()
+    if locations_only:
+        return [x["location"] for x in tasks]
+    return tasks
+
+
+# Add cache_clear as an attribute for backwards compatibility
+discover_tasks.cache_clear = _discover_tasks_impl.cache_clear  # type: ignore[attr-defined]
+
+
+def clear_discover_tasks_cache(sender: type[Any] | None, **kwargs: Any) -> None:
     logger.info("Clearing Django QStash discovered tasks cache")
-    discover_tasks.cache_clear()
+    _discover_tasks_impl.cache_clear()
 
 
 request_started.connect(

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from typing import Any
+from typing import cast
+
 from django.core.exceptions import ValidationError
 
+from django_qstash.discovery.utils import _discover_tasks_impl
 from django_qstash.discovery.utils import discover_tasks
 
 
-def task_exists_validator(task_name):
+def task_exists_validator(task_name: Any) -> None:
     """
     Validates that a task name exists in the discovered tasks
 
@@ -15,8 +19,8 @@ def task_exists_validator(task_name):
     Raises:
         ValidationError: If the task cannot be found
     """
-    discover_tasks.cache_clear()
-    available_tasks = discover_tasks(locations_only=True)
+    _discover_tasks_impl.cache_clear()
+    available_tasks = cast(list[str], discover_tasks(locations_only=True))
 
     if task_name not in available_tasks:
         raise ValidationError(

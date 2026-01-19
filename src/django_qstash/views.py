@@ -14,6 +14,25 @@ from .handlers import QStashWebhook
 @require_http_methods(["POST"])
 def qstash_webhook_view(request: HttpRequest) -> HttpResponse:
     """Handle QStash webhook requests."""
+    # Validate Content-Type
+    content_type = request.content_type.lower() if request.content_type else ""
+
+    # Extract base content type (before any ;charset= parameters)
+    content_type_base = content_type.split(";")[0].strip()
+
+    if content_type_base != "application/json":
+        return HttpResponse(
+            json.dumps(
+                {
+                    "status": "error",
+                    "error_type": "InvalidContentType",
+                    "error": f"Expected Content-Type 'application/json', got '{content_type or 'none'}'",
+                }
+            ),
+            status=415,  # Unsupported Media Type
+            content_type="application/json",
+        )
+
     webhook = QStashWebhook()
     response_data, status_code = webhook.handle_request(request)
     return HttpResponse(

@@ -20,6 +20,7 @@ classifiers = [
   "Framework :: Django :: 5.0",
   "Framework :: Django :: 5.1",
   "Framework :: Django :: 5.2",
+  "Framework :: Django :: 6.0",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
   "Natural Language :: English",
@@ -55,6 +56,9 @@ dev = [
   "python-decouple",
   "types-requests",
 ]
+
+[tool.setuptools.package-data]
+django_qstash = [ "py.typed" ]
 
 [tool.isort]
 add_imports = [
@@ -111,10 +115,18 @@ mypy_path = "src/"
 namespace_packages = false
 strict = true
 warn_unreachable = true
+warn_return_any = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+show_error_codes = true
 
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = "qstash.*"
+ignore_missing_imports = true
 
 [tool.rstcheck]
 ignore_directives = [

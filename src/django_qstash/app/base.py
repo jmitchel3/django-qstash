@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import functools
+from functools import partial
 from typing import Any
 from typing import Callable
+from typing import Generic
+from typing import TypeVar
+from typing import overload
 
 from django.core.exceptions import ImproperlyConfigured
 
@@ -11,30 +15,48 @@ from django_qstash.client import qstash_client
 from django_qstash.settings import DJANGO_QSTASH_DOMAIN
 from django_qstash.settings import QSTASH_TOKEN
 
+R = TypeVar("R")
+T = TypeVar("T")
 
-class QStashTask:
+
+class QStashTask(Generic[R]):
+    _is_delayed: bool
+
     def __init__(
         self,
-        func: Callable | None = None,
+        func: Callable[..., R] | None = None,
         name: str | None = None,
         delay_seconds: int | None = None,
         deduplicated: bool = False,
-        **options: dict[str, Any],
-    ):
+        **options: Any,
+    ) -> None:
         self.func = func
         self.name = name or (func.__name__ if func else None)
         self.delay_seconds = delay_seconds
         self.deduplicated = deduplicated
-        self.options = options
+        self.options: dict[str, Any] = dict(options)
+        self._is_delayed = False
 
         if func is not None:
             functools.update_wrapper(self, func)
 
-    def __get__(self, obj, objtype):
+    @overload
+    def __get__(self, obj: None, objtype: type[T]) -> QStashTask[R]: ...
+
+    @overload
+    def __get__(
+        self, obj: T, objtype: type[T] | None = None
+    ) -> partial[R | QStashTask[R] | AsyncResult]: ...
+
+    def __get__(
+        self, obj: T | None, objtype: type[T] | None = None
+    ) -> QStashTask[R] | partial[R | QStashTask[R] | AsyncResult]:
         """Support for instance methods"""
+        if obj is None:
+            return self
         return functools.partial(self.__call__, obj)
 
-    def __call__(self, *args, **kwargs):
+    def __call__(self, *args: Any, **kwargs: Any) -> R | QStashTask[R] | AsyncResult:
         """
         Execute the task, either directly or via QStash based on context
         """
@@ -81,17 +103,20 @@ class QStashTask:
         # Return an AsyncResult-like object for Celery compatibility
         return AsyncResult(response.message_id)
 
-    def delay(self, *args, **kwargs) -> AsyncResult:
+    def delay(self, *args: Any, **kwargs: Any) -> AsyncResult:
         """Celery-compatible delay() method"""
         self._is_delayed = True
-        return self(*args, **kwargs)
+        result = self(*args, **kwargs)
+        # When _is_delayed is True, __call__ returns AsyncResult
+        assert isinstance(result, AsyncResult)
+        return result
 
     def apply_async(
         self,
-        args: tuple | None = None,
-        kwargs: dict | None = None,
+        args: tuple[Any, ...] | None = None,
+        kwargs: dict[str, Any] | None = None,
         countdown: int | None = None,
-        **options: dict[str, Any],
+        **options: Any,
     ) -> AsyncResult:
         """Celery-compatible apply_async() method"""
         self._is_delayed = True
@@ -102,7 +127,10 @@ class QStashTask:
         # Fix: Ensure we're passing the arguments correctly
         args = args or ()
         kwargs = kwargs or {}
-        return self(*args, **kwargs)
+        result = self(*args, **kwargs)
+        # When _is_delayed is True, __call__ returns AsyncResult
+        assert isinstance(result, AsyncResult)
+        return result
 
 
 class AsyncResult:
