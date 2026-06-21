@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 from django.http import HttpRequest
 
+from django_qstash.db.models import TaskStatus
 from django_qstash.exceptions import PayloadError
 from django_qstash.exceptions import SignatureError
 from django_qstash.exceptions import TaskError
@@ -166,6 +167,52 @@ class TestQStashWebhook:
             result = webhook.execute_task(payload)
 
         assert result == "actual result"
+
+    def test_execute_task_plain_callable(self, webhook):
+        """A plain callable without actual_func is invoked directly."""
+
+        def plain(*args, **kwargs):
+            return "plain result"
+
+        payload = Mock(
+            function_path="test.path",
+            args=[],
+            kwargs={},
+            task_name="test.path",
+        )
+        with (
+            patch(
+                "django_qstash.handlers.discover_tasks",
+                return_value=["test.path"],
+            ),
+            patch("django_qstash.handlers.utils.import_string", return_value=plain),
+            patch("django_qstash.handlers._emit_signal"),
+        ):
+            result = webhook.execute_task(payload)
+
+        assert result == "plain result"
+
+    def test_handle_request_unexpected_error_stores_result(self, webhook):
+        """An unexpected error after the payload is parsed stores an INTERNAL_ERROR."""
+        request = Mock(spec=HttpRequest)
+        request.body = json.dumps(
+            {"function": "test_func", "module": "test_module", "args": [], "kwargs": {}}
+        ).encode()
+        request.headers = {"Upstash-Signature": "valid", "Upstash-Message-Id": "123"}
+        request.META = {"REMOTE_ADDR": "127.0.0.1"}
+        request.build_absolute_uri.return_value = "https://example.com"
+
+        with (
+            patch.object(webhook, "verify_signature"),
+            patch.object(webhook, "execute_task", side_effect=ValueError("kaboom")),
+            patch("django_qstash.handlers.store_task_result") as mock_store,
+        ):
+            response, status = webhook.handle_request(request)
+
+        assert status == 500
+        assert response["error_type"] == "InternalServerError"
+        mock_store.assert_called_once()
+        assert mock_store.call_args[1]["status"] == TaskStatus.INTERNAL_ERROR
 
 
 class TestEnsureHttps:

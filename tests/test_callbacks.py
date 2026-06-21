@@ -78,6 +78,53 @@ class TestValidateDomain:
             == "https://api.v1.staging.example.com"
         )
 
+    def test_missing_hostname_raises(self):
+        with pytest.raises(ImproperlyConfigured, match="must include a hostname"):
+            validate_domain("https://")
+
+    def test_urlparse_failure_raises(self):
+        with patch(
+            "django_qstash.callbacks.urlparse", side_effect=ValueError("bad url")
+        ):
+            with pytest.raises(
+                ImproperlyConfigured, match="Invalid DJANGO_QSTASH_DOMAIN"
+            ):
+                validate_domain("example.com")
+
+    def test_non_http_scheme_after_parse_raises(self):
+        from urllib.parse import ParseResult
+
+        fake = ParseResult(
+            scheme="ftp",
+            netloc="example.com",
+            path="",
+            params="",
+            query="",
+            fragment="",
+        )
+        with patch("django_qstash.callbacks.urlparse", return_value=fake):
+            with pytest.raises(ImproperlyConfigured, match="Invalid protocol"):
+                validate_domain("example.com")
+
+
+class TestGetCallbackUrlMisconfigured:
+    def test_no_domain_raises(self):
+        with patch("django_qstash.callbacks.DJANGO_QSTASH_DOMAIN", None):
+            with pytest.raises(
+                ImproperlyConfigured, match="DJANGO_QSTASH_DOMAIN is not set"
+            ):
+                get_callback_url()
+
+    def test_no_webhook_path_raises(self):
+        with (
+            patch("django_qstash.callbacks.DJANGO_QSTASH_DOMAIN", "example.com"),
+            patch("django_qstash.callbacks.DJANGO_QSTASH_WEBHOOK_PATH", None),
+        ):
+            with pytest.raises(
+                ImproperlyConfigured, match="DJANGO_QSTASH_WEBHOOK_PATH is not set"
+            ):
+                get_callback_url()
+
 
 @pytest.mark.parametrize(
     "domain,webhook_path,expected",

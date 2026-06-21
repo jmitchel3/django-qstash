@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from unittest.mock import patch
 
 import pytest
 from django.core.management import call_command
@@ -90,3 +91,13 @@ class TestClearStaleResults:
         remaining_tasks = TaskResult.objects.all()
         assert len(remaining_tasks) == 1
         assert remaining_tasks[0].task_id == recent_task.task_id
+
+    def test_clear_stale_results_delay_offloads_to_qstash(self):
+        """The --delay flag offloads the work via the task's delay()."""
+        with patch(
+            "django_qstash.results.tasks.clear_stale_results_task.delay"
+        ) as mock_delay:
+            call_command("clear_stale_results", "--no-input", "--delay")
+
+        mock_delay.assert_called_once()
+        assert mock_delay.call_args[1]["user_confirm"] is False

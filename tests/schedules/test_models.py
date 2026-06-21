@@ -143,6 +143,28 @@ def test_did_just_pause(db):
     )  # Should be True with 3 minute window
 
 
+def test_did_just_resume_false_when_not_resumed(db):
+    """did_just_resume returns False when the schedule isn't in a resumed state."""
+    schedule = TaskSchedule.objects.create(
+        name="Not Resumed",
+        task="myapp.tasks.test_task",
+        is_active=False,
+    )
+    assert schedule.is_resumed is False
+    assert schedule.did_just_resume() is False
+
+
+def test_did_just_pause_false_when_not_paused(db):
+    """did_just_pause returns False when the schedule isn't in a paused state."""
+    schedule = TaskSchedule.objects.create(
+        name="Not Paused",
+        task="myapp.tasks.test_task",
+        is_active=True,
+    )
+    assert schedule.is_paused is False
+    assert schedule.did_just_pause() is False
+
+
 @pytest.mark.parametrize(
     "timeout,retries,expected_valid",
     [

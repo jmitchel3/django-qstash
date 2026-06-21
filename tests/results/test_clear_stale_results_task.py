@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from io import StringIO
+from unittest.mock import patch
 
 import pytest
 from django.utils import timezone
@@ -221,3 +222,72 @@ class TestClearStaleResults:
         clear_stale_results_task(stdout=stdout)
 
         assert "No stale Django QStash task results found" in stdout.getvalue()
+
+    def test_skip_deletion_logs_without_stdout(
+        self, create_task_result, monkeypatch, caplog
+    ):
+        create_task_result("stale-task", age=timedelta(days=8))
+        monkeypatch.setattr("builtins.input", lambda _: "n")
+
+        with caplog.at_level("INFO"):
+            clear_stale_results_task(user_confirm=True)
+
+        assert TaskResult.objects.count() == 1
+        assert "Skipping deletion" in caplog.text
+
+    def test_no_results_logs_without_stdout(self, caplog):
+        with caplog.at_level("INFO"):
+            clear_stale_results_task()
+        assert "No stale Django QStash task results found" in caplog.text
+
+    def test_delete_logs_without_stdout(self, create_task_result, caplog):
+        create_task_result("stale-task", age=timedelta(days=8))
+        with caplog.at_level("INFO"):
+            clear_stale_results_task()
+        assert TaskResult.objects.count() == 0
+        assert "Successfully deleted 1 stale results." in caplog.text
+
+    def test_delete_error_without_stdout(self, create_task_result, caplog):
+        create_task_result("stale-task", age=timedelta(days=8))
+
+        class MockQuerySet:
+            def delete(self):
+                raise Exception("Boom")
+
+            def exists(self):
+                return True
+
+            def count(self):
+                return 1
+
+            def exclude(self, **kwargs):
+                return self
+
+        with patch(
+            "django_qstash.results.models.TaskResult.objects.filter",
+            return_value=MockQuerySet(),
+        ):
+            with pytest.raises(Exception, match="Boom"):
+                clear_stale_results_task()
+
+        assert "Error deleting stale results: Boom" in caplog.text
+
+
+def test_clear_stale_results_model_not_installed(caplog):
+    """A missing results model raises LookupError after logging."""
+    with patch(
+        "django_qstash.results.tasks.apps.get_model", side_effect=LookupError("nope")
+    ):
+        with pytest.raises(LookupError):
+            clear_stale_results_task()
+    assert "Django QStash Results not installed" in caplog.text
+
+
+def test_clear_stale_results_model_not_installed_with_stdout():
+    stdout = StringIO()
+    with patch(
+        "django_qstash.results.tasks.apps.get_model", side_effect=LookupError("nope")
+    ):
+        with pytest.raises(LookupError):
+            clear_stale_results_task(stdout=stdout)
+    assert "Django QStash Results not installed" in stdout.getvalue()

@@ -4,8 +4,11 @@ from unittest.mock import Mock
 from unittest.mock import patch
 
 import pytest
+from django.core.exceptions import ImproperlyConfigured
 
 from django_qstash.app import stashed_task
+from django_qstash.app.base import AsyncResult
+from django_qstash.app.base import QStashTask
 
 
 @stashed_task
@@ -16,6 +19,12 @@ def sample_task(x, y):
 @stashed_task(name="custom_task", deduplicated=True)
 def sample_task_with_options(x, y):
     return x * y
+
+
+class Calculator:
+    @stashed_task
+    def double(self, value):
+        return value * 2
 
 
 @pytest.fixture(autouse=True)
@@ -59,3 +68,63 @@ class TestQStashTasks:
         assert result.task_id == "test-id-123"
         call_kwargs = mock_qstash_client.message.publish_json.call_args[1]
         assert call_kwargs["delay"] == "60s"
+
+    def test_task_apply_async_without_countdown(self, mock_qstash_client):
+        """apply_async() without countdown still publishes to QStash."""
+        result = sample_task.apply_async(args=(2, 3))
+
+        assert result.task_id == "test-id-123"
+        mock_qstash_client.message.publish_json.assert_called_once()
+
+    def test_parameterized_decorator(self):
+        """stashed_task(name=...) returns a decorator that wraps the function."""
+        decorator = stashed_task(name="mytask")
+        assert callable(decorator)
+
+        def myfunc(a):
+            return a
+
+        wrapped = decorator(myfunc)
+        assert isinstance(wrapped, QStashTask)
+        assert wrapped.name == "mytask"
+        assert wrapped(5) == 5
+
+    def test_qstashtask_called_with_func_creates_wrapper(self):
+        """A QStashTask with no func, called with a function, wraps it."""
+        task = QStashTask(name="mytask")
+        assert task.func is None
+
+        def myfunc(a):
+            return a
+
+        wrapped = task(myfunc)
+        assert isinstance(wrapped, QStashTask)
+        assert wrapped.name == "mytask"
+        assert wrapped(7) == 7
+
+    def test_instance_method_access_and_call(self):
+        """Accessing a task on an instance binds it; calling runs it directly."""
+        calc = Calculator()
+        assert calc.double(4) == 8
+
+    def test_class_access_returns_task(self):
+        """Accessing a task on the class returns the QStashTask descriptor."""
+        assert isinstance(Calculator.double, QStashTask)
+
+    def test_missing_config_raises(self, monkeypatch):
+        """Missing QSTASH_TOKEN/DOMAIN raises ImproperlyConfigured on call."""
+        monkeypatch.setattr("django_qstash.app.base.QSTASH_TOKEN", "")
+        with pytest.raises(ImproperlyConfigured):
+            sample_task(2, 3)
+
+
+class TestAsyncResult:
+    def test_id_property(self):
+        result = AsyncResult("abc-123")
+        assert result.id == "abc-123"
+        assert result.task_id == "abc-123"
+
+    def test_get_not_implemented(self):
+        result = AsyncResult("abc-123")
+        with pytest.raises(NotImplementedError):
+            result.get()

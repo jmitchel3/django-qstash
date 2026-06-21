@@ -99,7 +99,7 @@ class TaskSchedule(models.Model):
             self.resumed_at = None
             self.active_at = None
             self.is_active = False
-        elif self.is_active:
+        else:
             self.is_paused = False
             self.is_resumed = True
             self.paused_at = None

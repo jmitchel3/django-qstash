@@ -1,6 +1,9 @@
+from __future__ import annotations
+
 import pytest
 
-from django_qstash.utils import import_string, validate_task_payload
+from django_qstash.utils import import_string
+from django_qstash.utils import validate_task_payload
 
 
 def test_import_string():
@@ -47,3 +50,25 @@ def test_validate_task_payload():
     is_valid, message = validate_task_payload(invalid_payload)
     assert not is_valid
     assert "Args must be" in message
+
+    # Invalid kwargs type
+    invalid_payload = {
+        "function": "task_func",
+        "module": "my_app.tasks",
+        "args": [1, 2, 3],
+        "kwargs": ["not", "a", "dict"],
+    }
+    is_valid, message = validate_task_payload(invalid_payload)
+    assert not is_valid
+    assert "Kwargs must be a dictionary" in message
+
+    # Tuple args are accepted
+    is_valid, message = validate_task_payload(
+        {
+            "function": "task_func",
+            "module": "my_app.tasks",
+            "args": (1, 2),
+            "kwargs": {},
+        }
+    )
+    assert is_valid
