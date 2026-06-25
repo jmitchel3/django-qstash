@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import functools
+import inspect
+from datetime import datetime
+from datetime import timezone
 from functools import partial
 from typing import Any
 from typing import Callable
@@ -19,9 +22,75 @@ R = TypeVar("R")
 T = TypeVar("T")
 
 
-class QStashTask(Generic[R]):
-    _is_delayed: bool
+MESSAGE_OPTION_NAMES = frozenset(
+    {
+        "callback",
+        "callback_headers",
+        "content_based_deduplication",
+        "deduplicated",
+        "deduplication_id",
+        "delay",
+        "failure_callback",
+        "failure_callback_headers",
+        "flow_control",
+        "headers",
+        "label",
+        "max_retries",
+        "method",
+        "not_before",
+        "queue",
+        "redact",
+        "retries",
+        "retry_delay",
+        "timeout",
+    }
+)
 
+
+def _timestamp(value: datetime | int | float) -> int:
+    """Convert Celery-style eta values to QStash's unix timestamp format."""
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return int(value.timestamp())
+    return int(value)
+
+
+def _delay(value: Any) -> Any:
+    """Preserve the historical N-seconds string format for integer delays."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return f"{value}s"
+    return value
+
+
+def _supported_kwargs(
+    method: Callable[..., Any], options: dict[str, Any]
+) -> dict[str, Any]:
+    signature = inspect.signature(method)
+    if any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    ):
+        return options
+
+    supported = {
+        name
+        for name, parameter in signature.parameters.items()
+        if name != "self"
+        and parameter.kind
+        in (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    }
+    unsupported = sorted(set(options) - supported)
+    if unsupported:
+        unsupported_list = ", ".join(unsupported)
+        raise ImproperlyConfigured(
+            "The installed qstash package does not support these message options: "
+            f"{unsupported_list}. Upgrade qstash to a version that supports them."
+        )
+    return options
+
+
+class QStashTask(Generic[R]):
     def __init__(
         self,
         func: Callable[..., R] | None = None,
@@ -35,7 +104,6 @@ class QStashTask(Generic[R]):
         self.delay_seconds = delay_seconds
         self.deduplicated = deduplicated
         self.options: dict[str, Any] = dict(options)
-        self._is_delayed = False
 
         if func is not None:
             functools.update_wrapper(self, func)
@@ -74,63 +142,108 @@ class QStashTask(Generic[R]):
                 **self.options,
             )
 
-        # If called directly (not through delay/apply_async), execute the function
-        if not getattr(self, "_is_delayed", False):
-            return self.func(*args, **kwargs)
+        return self.func(*args, **kwargs)
 
-        # Reset the delayed flag
-        self._is_delayed = False
+    def _message_options(
+        self,
+        options: dict[str, Any],
+        countdown: int | None = None,
+        eta: datetime | int | float | None = None,
+    ) -> dict[str, Any]:
+        message_options = dict(self.options)
+        message_options.update(options)
 
-        # Prepare the payload
+        if self.delay_seconds is not None:
+            message_options.setdefault("delay", self.delay_seconds)
+        if countdown is not None:
+            message_options["delay"] = countdown
+        if eta is not None:
+            message_options["not_before"] = _timestamp(eta)
+
+        max_retries = message_options.pop("max_retries", None)
+        if max_retries is not None and "retries" not in message_options:
+            message_options["retries"] = max_retries
+
+        deduplicated = message_options.pop("deduplicated", None)
+        if (
+            deduplicated is not None
+            and "content_based_deduplication" not in message_options
+        ):
+            message_options["content_based_deduplication"] = deduplicated
+        if self.deduplicated:
+            message_options.setdefault("content_based_deduplication", True)
+
+        if "delay" in message_options:
+            message_options["delay"] = _delay(message_options["delay"])
+
+        return {
+            key: value
+            for key, value in message_options.items()
+            if key in MESSAGE_OPTION_NAMES and value is not None
+        }
+
+    def _enqueue(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        countdown: int | None = None,
+        eta: datetime | int | float | None = None,
+        **options: Any,
+    ) -> AsyncResult:
+        if self.func is None:
+            raise ImproperlyConfigured("QStashTask must wrap a function before queuing")
+
         payload = {
             "function": self.func.__name__,
             "module": self.func.__module__,
-            "args": args,  # Send args as-is
+            "args": args,
             "kwargs": kwargs,
             "task_name": self.name,
             "options": self.options,
         }
 
         url = get_callback_url()
-        # Send to QStash using the official SDK
-        response = qstash_client.message.publish_json(
-            url=url,
-            body=payload,
-            delay=f"{self.delay_seconds}s" if self.delay_seconds else None,
-            retries=self.options.get("max_retries", 3),
-            content_based_deduplication=self.deduplicated,
+        message_options = self._message_options(
+            options=options,
+            countdown=countdown,
+            eta=eta,
         )
+        queue = message_options.pop("queue", None)
+
+        if queue is None:
+            method = qstash_client.message.publish_json
+            send_options = _supported_kwargs(method, message_options)
+            response = method(url=url, body=payload, **send_options)
+        else:
+            method = qstash_client.message.enqueue_json
+            send_options = _supported_kwargs(method, message_options)
+            response = method(queue=queue, url=url, body=payload, **send_options)
+
         # Return an AsyncResult-like object for Celery compatibility
         return AsyncResult(response.message_id)
 
     def delay(self, *args: Any, **kwargs: Any) -> AsyncResult:
         """Celery-compatible delay() method"""
-        self._is_delayed = True
-        result = self(*args, **kwargs)
-        # When _is_delayed is True, __call__ returns AsyncResult
-        assert isinstance(result, AsyncResult)
-        return result
+        return self._enqueue(args=args, kwargs=kwargs)
 
     def apply_async(
         self,
         args: tuple[Any, ...] | None = None,
         kwargs: dict[str, Any] | None = None,
         countdown: int | None = None,
+        eta: datetime | int | float | None = None,
         **options: Any,
     ) -> AsyncResult:
         """Celery-compatible apply_async() method"""
-        self._is_delayed = True
-        if countdown is not None:
-            self.delay_seconds = countdown
-        self.options.update(options)
-
-        # Fix: Ensure we're passing the arguments correctly
         args = args or ()
         kwargs = kwargs or {}
-        result = self(*args, **kwargs)
-        # When _is_delayed is True, __call__ returns AsyncResult
-        assert isinstance(result, AsyncResult)
-        return result
+        return self._enqueue(
+            args=args,
+            kwargs=kwargs,
+            countdown=countdown,
+            eta=eta,
+            **options,
+        )
 
 
 class AsyncResult:

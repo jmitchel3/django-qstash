@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+from datetime import timezone
 from unittest.mock import Mock
 from unittest.mock import patch
 
@@ -36,6 +38,7 @@ def mock_qstash_client():
         mock_response = Mock()
         mock_response.message_id = "test-id-123"
         mock_message.publish_json = Mock(return_value=mock_response)
+        mock_message.enqueue_json = Mock(return_value=mock_response)
 
         # Attach the mock message object to the client
         mock_client.message = mock_message
@@ -75,6 +78,53 @@ class TestQStashTasks:
 
         assert result.task_id == "test-id-123"
         mock_qstash_client.message.publish_json.assert_called_once()
+
+    def test_task_apply_async_delay_does_not_leak(self, mock_qstash_client):
+        """Per-call delay options do not mutate the shared task wrapper."""
+        sample_task.apply_async(args=(2, 3), countdown=60)
+        sample_task.apply_async(args=(2, 3))
+
+        first_call = mock_qstash_client.message.publish_json.call_args_list[0]
+        second_call = mock_qstash_client.message.publish_json.call_args_list[1]
+        assert first_call.kwargs["delay"] == "60s"
+        assert "delay" not in second_call.kwargs
+
+    def test_task_apply_async_qstash_options(self, mock_qstash_client):
+        """Supported QStash message options are forwarded to publish_json."""
+        eta = datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc)
+
+        result = sample_task.apply_async(
+            args=(2, 3),
+            delay=10,
+            max_retries=5,
+            deduplication_id="task-2-3",
+            callback="https://example.com/qstash/callback/",
+            failure_callback="https://example.com/qstash/failure/",
+            headers={"X-Trace-Id": "abc"},
+            timeout="30s",
+            eta=eta,
+        )
+
+        assert result.task_id == "test-id-123"
+        call_kwargs = mock_qstash_client.message.publish_json.call_args.kwargs
+        assert call_kwargs["delay"] == "10s"
+        assert call_kwargs["retries"] == 5
+        assert call_kwargs["deduplication_id"] == "task-2-3"
+        assert call_kwargs["callback"] == "https://example.com/qstash/callback/"
+        assert call_kwargs["failure_callback"] == "https://example.com/qstash/failure/"
+        assert call_kwargs["headers"] == {"X-Trace-Id": "abc"}
+        assert call_kwargs["timeout"] == "30s"
+        assert call_kwargs["not_before"] == int(eta.timestamp())
+
+    def test_task_apply_async_queue_uses_enqueue_json(self, mock_qstash_client):
+        """The queue option uses QStash enqueue for FIFO task delivery."""
+        result = sample_task.apply_async(args=(2, 3), queue="emails")
+
+        assert result.task_id == "test-id-123"
+        mock_qstash_client.message.enqueue_json.assert_called_once()
+        call_kwargs = mock_qstash_client.message.enqueue_json.call_args.kwargs
+        assert call_kwargs["queue"] == "emails"
+        assert call_kwargs["body"]["args"] == (2, 3)
 
     def test_parameterized_decorator(self):
         """stashed_task(name=...) returns a decorator that wraps the function."""

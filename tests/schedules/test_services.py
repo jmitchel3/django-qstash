@@ -57,48 +57,33 @@ def test_sync_state_changes_pause(task_schedule):
 @pytest.mark.django_db
 def test_get_task_schedule_from_qstash(task_schedule):
     """Test getting a schedule from QStash"""
-    # Create a Schedule instance handling potential version differences
-    try:
-        # Try the newer version with all parameters
-        mock_schedule = Schedule(
-            "https://example.com/task",  # url
-            "test body",  # body
-            3,  # retries
-            "*/5 * * * *",  # cron
-            "2024-01-01T00:00:00Z",  # created_at
-            "2024-01-01T00:05:00Z",  # next_run
-            "2024-01-01T00:00:00Z",  # last_run
-            "POST",  # method
-            {},  # headers
-            None,  # delay
-            None,  # callback
-            "active",  # status
-            None,  # failure_callback
-            None,  # not_before
-            None,  # flow_control_key
-            1,  # parallelism
-            0,  # rate_per_second
-        )
-    except TypeError:
-        # Fall back to the older version without the additional parameters
-        mock_schedule = Schedule(
-            "https://example.com/task",  # url
-            "test body",  # body
-            3,  # retries
-            "*/5 * * * *",  # cron
-            "2024-01-01T00:00:00Z",  # created_at
-            "2024-01-01T00:05:00Z",  # next_run
-            "2024-01-01T00:00:00Z",  # last_run
-            "POST",  # method
-            {},  # headers
-            None,  # delay
-            None,  # callback
-            "active",  # status
-            None,  # failure_callback
-            None,  # not_before
-        )
-    # Set id after creation
-    mock_schedule.id = "test-id"
+    mock_schedule = Schedule(
+        schedule_id="test-id",
+        destination="https://example.com/task",
+        cron="*/5 * * * *",
+        created_at=1704067200,
+        body="test body",
+        body_base64=None,
+        method="POST",
+        headers={},
+        callback_headers=None,
+        failure_callback_headers=None,
+        retries=3,
+        retry_delay_expression=None,
+        callback=None,
+        failure_callback=None,
+        queue=None,
+        delay=None,
+        timeout=None,
+        caller_ip=None,
+        paused=False,
+        flow_control=None,
+        last_schedule_time=None,
+        next_schedule_time=None,
+        last_schedule_states=None,
+        error=None,
+        label=None,
+    )
 
     with patch(
         "django_qstash.schedules.services.qstash_client.schedule.get",

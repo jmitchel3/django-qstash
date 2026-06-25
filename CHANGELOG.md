@@ -2,6 +2,69 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-06-25
+
+### Changed
+- **Upgraded the `qstash` dependency to v3 (`qstash>=3,<4`).** This is a major-version bump of the underlying SDK. Apps that use django-qstash exclusively are unaffected, but apps that also import the `qstash` package directly (pinned to v2) must upgrade to v3, which has its own breaking API changes (e.g. the restructured `Schedule` dataclass).
+- **Default retry behavior.** When a task does not define `max_retries`, django-qstash no longer forces `retries=3`; it now omits the option so QStash applies your account-level default. Tasks that relied on exactly 3 retries should set `max_retries` explicitly.
+- Reworked `QStashTask` so per-call options no longer mutate the shared task wrapper. Previously `apply_async(countdown=...)`/options leaked onto the task and affected later `delay()`/`apply_async()` calls; each call is now independent.
+
+### Added
+- `apply_async()` now forwards supported QStash message options (`callback`, `failure_callback`, `headers`, `timeout`, `deduplication_id`, `flow_control`, etc.) and supports Celery-style `eta` alongside `countdown`.
+- `apply_async(queue=...)` routes through QStash's `enqueue_json` for FIFO queue delivery. Note: queues do not support `delay`/`not_before`, so combining `queue` with `countdown`/`eta` raises `ImproperlyConfigured`.
+- Unsupported message options now raise `ImproperlyConfigured` with guidance to upgrade `qstash`, rather than failing obscurely.
+
+## [0.2.4] - 2026-01-19
+
+### Fixed
+- Minor bug fix.
+- Updated security test.
+
+## [0.2.3] - 2026-01-19
+
+### Added
+- Python 3.14 support.
+
+## [0.2.2] - 2026-01-18
+
+### Changed
+- Updated callbacks.
+
+## [0.2.1] - 2026-01-18
+
+### Changed
+- Maintenance release.
+
+## [0.2.0] - 2026-01-16
+
+### Changed
+- Migrated to [uv](https://docs.astral.sh/uv/) for dependency management.
+- Fixed git command paths in `rav.yaml`.
+
+## [0.1.4] - 2026-01-16
+
+### Fixed
+- Upstash domain validation no longer always triggers a warning.
+
+### Added
+- Added `context7.json` for documentation indexing.
+- Updated `rav` scripts.
+
+## [0.1.3] - 2025-09-11
+
+### Changed
+- Pinned `qstash-py` to v2.
+- Moved a warning.
+
+## [0.1.2] - 2025-04-03
+
+### Added
+- Support for Django 5.2.
+
+### Fixed
+- Updated test requirements.
+- README fixes and typo corrections.
+
 ## [0.1.1] - 2025-02-06
 
 ### Added
