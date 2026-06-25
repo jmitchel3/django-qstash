@@ -164,7 +164,13 @@ DJANGO_QSTASH_WEBHOOK_PATH = "/qstash/webhook/"
 
 
 ## Sample Project
-There is a sample project in [sample_project/](sample_project/) that shows how all this is implemented.
+There is a sample project in [sample_project/](sample_project/) that shows how all this is implemented. It runs **fully locally** — including the task round-trip — with a single command:
+
+```bash
+docker compose -f compose.dev.yaml up --build
+```
+
+See [sample_project/README.md](sample_project/README.md) for the full walkthrough (and a host-Django alternative).
 
 ## Dependencies
 
@@ -341,13 +347,20 @@ To get a public domain during development, we recommend any of the following:
 Once you have a domain name, you can configure the `DJANGO_QSTASH_DOMAIN` setting in your Django settings.
 
 ### Development with Docker Compose
-Upstash covers how to run QStash during development on [this guide](https://upstash.com/docs/qstash/howto/local-development)
+Upstash covers how to run QStash during development on [this guide](https://upstash.com/docs/qstash/howto/local-development). [compose.dev.yaml](./compose.dev.yaml) runs the QStash dev server (and, optionally, the sample Django app) entirely locally — no public domain or Upstash account required.
 
-In our case we need to the following things:
+The QStash dev server runs in Docker and **calls back into your Django app** to execute tasks, so two things matter locally:
 
-- `docker compose -f compose.dev.yaml up`
+- `DJANGO_QSTASH_DOMAIN` must be reachable *from the container*. Run Django on `0.0.0.0` and point the domain at `http://host.docker.internal:8000`.
+- `DJANGO_QSTASH_FORCE_HTTPS=False`, so the plain-http callback verifies.
+
+To wire it up:
+
+- `docker compose -f compose.dev.yaml up qstash` — start just the dev server.
 - Add `QSTASH_URL=http://127.0.0.1:8585` to your `.env` file.
-- Use the `QSTASH_TOKEN`, `QSTASH_CURRENT_SIGNING_KEY`, and `QSTASH_NEXT_SIGNING_KEY` the terminal output of Docker compose _or_ the values listed in [compose.dev.yaml](./compose.dev.yaml).
+- Use the `QSTASH_TOKEN`, `QSTASH_CURRENT_SIGNING_KEY`, and `QSTASH_NEXT_SIGNING_KEY` from the Docker compose terminal output _or_ the values listed in [compose.dev.yaml](./compose.dev.yaml).
+
+The [sample project](sample_project/README.md) ships a ready-to-run `.env.sample` plus a `qstash_smoke_test` management command that enqueues a task and waits for the webhook result — a one-command way to confirm your local setup round-trips end to end. You can also bring up the whole stack (Django + QStash) at once with `docker compose -f compose.dev.yaml up --build`.
 
 ## Django Settings Configuration
 

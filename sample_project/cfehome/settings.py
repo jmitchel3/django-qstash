@@ -40,6 +40,12 @@ DJANGO_QSTASH_DOMAIN = config("DJANGO_QSTASH_DOMAIN")
 DJANGO_QSTASH_WEBHOOK_PATH = config(
     "DJANGO_QSTASH_WEBHOOK_PATH", default="/qstash/webhook/"
 )
+# In local development the QStash dev server calls back over plain http
+# (e.g. http://host.docker.internal:8000), so HTTPS must not be forced.
+# In production this should be True (the default) so callbacks use https.
+DJANGO_QSTASH_FORCE_HTTPS = config(
+    "DJANGO_QSTASH_FORCE_HTTPS", default=not DEBUG, cast=bool
+)
 
 # Dangerous: disable host header validation
 ALLOWED_HOSTS = ["*"]

@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.3.1] - 2026-06-25
 
 ### Fixed
 - Scheduled tasks now send QStash webhook payloads with `Content-Type: application/json`, matching normal `.delay()`/`.apply_async()` task dispatch.
@@ -11,6 +11,9 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 - Added a README workflow diagram showing how `.delay()` publishes to QStash and returns through `/qstash/webhook/`.
+- Expanded the sample project into a fully-local Docker Compose walkthrough for Django plus the QStash dev server.
+- Added a `qstash_smoke_test` management command that enqueues a sample task and waits for the webhook result.
+- Added `rav` shortcuts for running the local QStash server, sample project, and smoke test.
 
 ## [0.3.0] - 2026-06-25
 

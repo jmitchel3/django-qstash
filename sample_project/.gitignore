@@ -1,1 +1,15 @@
+# Local environment / secrets
+.env
+
+# SQLite dev database
+db.sqlite3
+db.sqlite3-journal
+
+# Virtualenvs
 /venv/
+/.venv/
+
+# Byte-compiled / stray task output
+__pycache__/
+*.py[cod]
+test.txt

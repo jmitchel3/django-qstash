@@ -1,0 +1,8 @@
+# Dependencies for the django-qstash sample project.
+#
+#   pip install -r requirements.txt
+#
+# Installs the local django-qstash package in editable mode (which pulls in
+# Django, qstash, and requests) plus python-decouple for reading the .env file.
+-e ..
+python-decouple

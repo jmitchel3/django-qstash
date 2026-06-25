@@ -1,11 +1,57 @@
+# Fully-local development stack for django-qstash.
+#
+# Two ways to use it:
+#
+#   1. One command, everything in Docker (Django + QStash dev server):
+#        docker compose -f compose.dev.yaml up --build
+#      Open http://127.0.0.1:8000 — enqueued tasks round-trip through the
+#      local QStash dev server back to the "web" container. No public domain,
+#      no Upstash account, no ngrok required.
+#
+#   2. Lightweight: run only the QStash dev server here and run Django on the
+#      host (hot reload, debugger, etc.):
+#        docker compose -f compose.dev.yaml up qstash
+#        cd sample_project && python manage.py runserver 0.0.0.0:8000
+#      In that mode the sample .env points DJANGO_QSTASH_DOMAIN at
+#      http://host.docker.internal:8000 so the container can call back to the
+#      host. See sample_project/README.md for details.
+#
+# The QSTASH_* values below are the fixed dev-server credentials printed by
+# `qstash dev`; they are safe to commit and are for local development only.
 services:
-  qstash_dev:
+  qstash:
     image: public.ecr.aws/upstash/qstash:latest
     command: qstash dev
     ports:
-      - 8585:8080
+      - "8585:8080"
+    # Lets the QStash dev server reach a Django server running on the host
+    # (Docker Desktop provides this automatically; required on Linux).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  web:
+    build:
+      context: .
+      dockerfile: sample_project/Dockerfile
+    command: sh -c "python manage.py migrate --noinput && python manage.py runserver 0.0.0.0:8000"
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount the sample app for hot reload. The local package is installed in
+      # the image; rebuild (--build) if you change src/django_qstash.
+      - ./sample_project:/app
     environment:
-      - QSTASH_URL=http://localhost:8585
-      - QSTASH_TOKEN=eyJVc2VySUQiOiJkZWZhdWx0VXNlciIsIlBhc3N3b3JkIjoiZGVmYXVsdFBhc3N3b3JkIn0=
-      - QSTASH_CURRENT_SIGNING_KEY=sig_7kYjw48mhY7kAjqNGcy6cr29RJ6r
-      - QSTASH_NEXT_SIGNING_KEY=sig_5ZB6DVzB1wjE8S6rZ7eenA8Pdnhs
+      DJANGO_DEBUG: "1"
+      DJANGO_SECRET_KEY: "local-dev-not-secret"
+      CSRF_TRUSTED_ORIGINS: "http://127.0.0.1:8000,http://localhost:8000"
+      # Reach the QStash dev server over the compose network.
+      QSTASH_URL: "http://qstash:8080"
+      QSTASH_TOKEN: "eyJVc2VySUQiOiJkZWZhdWx0VXNlciIsIlBhc3N3b3JkIjoiZGVmYXVsdFBhc3N3b3JkIn0="
+      QSTASH_CURRENT_SIGNING_KEY: "sig_7kYjw48mhY7kAjqNGcy6cr29RJ6r"
+      QSTASH_NEXT_SIGNING_KEY: "sig_5ZB6DVzB1wjE8S6rZ7eenA8Pdnhs"
+      # QStash calls back to the "web" service over the compose network.
+      DJANGO_QSTASH_DOMAIN: "http://web:8000"
+      DJANGO_QSTASH_WEBHOOK_PATH: "/qstash/webhook/"
+      DJANGO_QSTASH_FORCE_HTTPS: "False"
+    depends_on:
+      - qstash

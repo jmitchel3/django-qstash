@@ -3,7 +3,7 @@ description: Rav is a shortcut to run commands on your local machine.
 
 scripts:
   install:
-    - venv/bin/python3 -m pip install -e .
+    - uv sync
   update_django_constraints:
     - uv run python tests/requirements/update_django_constraints.py
   compile_test_requirements:
@@ -12,18 +12,37 @@ scripts:
     - uv run tox run -f py312
     - uv run coverage combine
     - uv run coverage report
-  sample_server:
-    - cd sample_project && ../venv/bin/python manage.py runserver 8133
-  sample_shell:
-    - cd sample_project && ../venv/bin/python manage.py shell
   bump:
-    - venv/bin/bump2version patch
+    - uv run bump2version patch
   bump_and_push_release:
-    - venv/bin/bump2version patch
+    - uv run bump2version patch
     - git push origin main
     - git push origin main --tags
+
+  # --- Local QStash dev server (Docker) ---
+  qstash:
+    # Run only the QStash dev server; run Django on the host yourself.
+    - docker compose -f compose.dev.yaml up qstash
+  qstash_down:
+    - docker compose -f compose.dev.yaml down
+
+  # --- Sample project: fully-dockerized one-command stack ---
+  sample_stack:
+    # Django + QStash dev server, everything in Docker. Open http://127.0.0.1:8000
+    - docker compose -f compose.dev.yaml up --build
+
+  # --- Sample project: run Django on the host (needs `rav qstash` running) ---
+  sample_setup:
+    - cd sample_project && test -f .env || cp .env.sample .env
+    - cd sample_project && uv run python manage.py migrate
+  sample_server:
+    # Bind 0.0.0.0 so the QStash dev container can call back via host.docker.internal.
+    - cd sample_project && uv run python manage.py runserver 0.0.0.0:8000
+  sample_shell:
+    - cd sample_project && uv run python manage.py shell
+  sample_smoke:
+    # End-to-end round-trip check: enqueue a task, wait for the webhook result.
+    - cd sample_project && uv run python manage.py qstash_smoke_test
   makemigrations:
-    - cd sample_project && ../venv/bin/python manage.py makemigrations
-    - ../venv/bin/python manage.py migrate
-  qstash_dev:
-    - docker compose -f compose.dev.yaml up
+    - cd sample_project && uv run python manage.py makemigrations
+    - cd sample_project && uv run python manage.py migrate
