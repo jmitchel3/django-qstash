@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Any
 
 from django.conf import settings
 from django.core.validators import MaxValueValidator
@@ -15,6 +16,24 @@ DJANGO_QSTASH_DOMAIN = getattr(settings, "DJANGO_QSTASH_DOMAIN", None)
 DJANGO_QSTASH_WEBHOOK_PATH = getattr(
     settings, "DJANGO_QSTASH_WEBHOOK_PATH", "/qstash/webhook/"
 )
+
+
+def _normalize_task_reference(value: Any) -> str:
+    if not value:
+        return ""
+    if isinstance(value, str):
+        return value
+
+    wrapped_func = getattr(value, "func", None)
+    if wrapped_func is not None:
+        return f"{wrapped_func.__module__}.{wrapped_func.__name__}"
+
+    module = getattr(value, "__module__", None)
+    name = getattr(value, "__name__", None)
+    if module and name:
+        return f"{module}.{name}"
+
+    return str(value)
 
 
 class TaskSchedule(models.Model):
@@ -87,8 +106,19 @@ class TaskSchedule(models.Model):
     is_resumed = models.BooleanField(default=False)
     resumed_at = models.DateTimeField(null=True, blank=True)
 
+    def __str__(self) -> str:
+        return self.name or self.task_name or self.task
+
     def save(self, *args, **kwargs):
-        current_task_name = self.task
+        current_task_name = _normalize_task_reference(self.task)
+        if not current_task_name:
+            fallback_task_name = _normalize_task_reference(self.task_name)
+            if "." in fallback_task_name:
+                current_task_name = fallback_task_name
+
+        if current_task_name:
+            self.task = current_task_name
+
         if not self.pk or self.task_name != current_task_name:
             self.task_name = current_task_name
 

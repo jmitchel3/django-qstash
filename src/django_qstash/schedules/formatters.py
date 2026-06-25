@@ -6,6 +6,8 @@ from typing import Any
 from django_qstash.callbacks import get_callback_url
 from django_qstash.schedules.models import TaskSchedule
 
+JSON_CONTENT_TYPE = "application/json"
+
 
 def prepare_qstash_payload(instance: TaskSchedule) -> dict[str, Any]:
     """Prepare the task payload for QStash"""
@@ -28,6 +30,7 @@ def format_task_schedule_for_qstash(instance: TaskSchedule) -> dict[str, Any]:
     data = {
         "destination": callback_url,
         "body": json.dumps(payload),
+        "content_type": JSON_CONTENT_TYPE,
         "cron": instance.cron,
         "retries": instance.retries,
         "timeout": instance.timeout,

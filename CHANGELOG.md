@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- Scheduled tasks now send QStash webhook payloads with `Content-Type: application/json`, matching normal `.delay()`/`.apply_async()` task dispatch.
+- The Task Schedule admin list now shows the human-readable schedule name separately from the raw task path.
+- The README schedule example now uses the correct `discover_tasks(locations_only=True)` API and assigns the selected task path to `task`.
+
+### Added
+- Added a README workflow diagram showing how `.delay()` publishes to QStash and returns through `/qstash/webhook/`.
+
 ## [0.3.0] - 2026-06-25
 
 ### Changed

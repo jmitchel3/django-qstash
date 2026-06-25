@@ -7,6 +7,7 @@ from django.core.exceptions import ValidationError
 from django.utils import timezone
 
 from django_qstash.schedules.models import TaskSchedule
+from tests.discovery.tasks import debug_task
 
 
 def test_task_schedule_creation(task_schedule):
@@ -35,6 +36,43 @@ def test_task_name_persistence(db):
     schedule.task = "myapp.tasks.new_task"
     schedule.save()
     assert schedule.task_name == "myapp.tasks.new_task"
+
+
+def test_task_schedule_string_uses_human_name(task_schedule):
+    assert str(task_schedule) == "Test Schedule"
+
+
+def test_task_schedule_accepts_decorated_task_object(db):
+    """Programmatic schedules can pass the decorated task object to task."""
+    schedule = TaskSchedule.objects.create(
+        name="Debug",
+        task=debug_task,
+    )
+
+    assert schedule.task == "tests.discovery.tasks.debug_task"
+    assert schedule.task_name == "tests.discovery.tasks.debug_task"
+
+
+def test_task_schedule_uses_legacy_task_name_path_when_task_missing(db):
+    """Legacy code that passed the path via task_name still gets a valid task."""
+    schedule = TaskSchedule.objects.create(
+        name="Debug",
+        task_name="tests.discovery.tasks.debug_task",
+    )
+
+    assert schedule.task == "tests.discovery.tasks.debug_task"
+    assert schedule.task_name == "tests.discovery.tasks.debug_task"
+
+
+def test_task_schedule_uses_legacy_task_name_object_when_task_missing(db):
+    """Legacy code that passed a decorated task via task_name is normalized."""
+    schedule = TaskSchedule.objects.create(
+        name="Debug",
+        task_name=debug_task,
+    )
+
+    assert schedule.task == "tests.discovery.tasks.debug_task"
+    assert schedule.task_name == "tests.discovery.tasks.debug_task"
 
 
 @pytest.mark.parametrize(

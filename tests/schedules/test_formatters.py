@@ -55,6 +55,7 @@ class TestFormatters:
 
         # Verify data structure
         assert data["destination"] == get_callback_url()
+        assert data["content_type"] == "application/json"
         assert data["cron"] == "*/10 * * * *"
         assert data["retries"] == 3
         assert data["timeout"] == "30s"

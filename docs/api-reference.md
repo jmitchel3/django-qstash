@@ -347,8 +347,8 @@ Represents a scheduled task using QStash Schedules. Available when `django_qstas
 |-------|------|-------------|
 | `schedule_id` | `CharField(255)` | QStash schedule ID (auto-populated) |
 | `name` | `CharField(200)` | Human-readable name for the schedule |
-| `task` | `TaskField` | The task to execute (dropdown of discovered tasks) |
-| `task_name` | `CharField(255)` | Original Python path of the task |
+| `task` | `TaskField` | The task to execute. In forms/admin this is a dropdown of discovered tasks; in Python it can be a dotted task path or decorated task object. |
+| `task_name` | `CharField(255)` | Managed Python path of the selected task |
 | `args` | `JSONField` | Positional arguments as JSON list |
 | `kwargs` | `JSONField` | Keyword arguments as JSON dict |
 | `cron` | `CharField(255)` | Cron expression (e.g., `"0 0 * * *"`) |

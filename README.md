@@ -131,6 +131,21 @@ Be sure to use this path in your `DJANGO_QSTASH_WEBHOOK_PATH` environment variab
 
 The `django_qstash` webhook handler runs your `@shared_task` or `@stashed_task` functions via the `importlib` module. In other words, you should not need to modify the webhook handler.
 
+```mermaid
+sequenceDiagram
+    participant App as Django code
+    participant Q as Upstash QStash
+    participant Webhook as /qstash/webhook/
+    participant Task as Task function
+
+    App->>Q: my_task.delay(args) publishes JSON payload
+    Q->>Webhook: POST signed JSON webhook
+    Webhook->>Webhook: Verify signature and validate payload
+    Webhook->>Task: Import module.function and call with args
+    Task-->>Webhook: Return result or raise error
+    Webhook-->>Q: HTTP response controls retry behavior
+```
+
 
 ### Required Environment Variables
 
@@ -430,9 +445,9 @@ Here's how you can schedule a task:
 from django_qstash.schedules.models import TaskSchedule
 from django_qstash.discovery.utils import discover_tasks
 
-all_available_tasks = discover_tasks(paths_only=True)
+all_available_tasks = discover_tasks(locations_only=True)
 
-desired_task = "django_qstash.results.clear_stale_results_task"
+desired_task = "django_qstash.results.tasks.clear_stale_results_task"
 # or desired_task = "example_app.tasks.my_task"
 
 task_to_use = desired_task
@@ -444,12 +459,13 @@ print(f"Using task: {task_to_use}")
 TaskSchedule.objects.create(
     name="My Schedule",
     cron="0 0 * * *",
-    task_name=task_to_use,
+    task=task_to_use,
     args=["arg1", "arg2"],
     kwargs={"kwarg1": "value1", "kwarg2": "value2"},
 )
 ```
-- `django_qstash.results.clear_stale_results_task` is a built-in task that `django_qstash.results` provides
+- `django_qstash.results.tasks.clear_stale_results_task` is a built-in task that `django_qstash.results` provides
+- Use the `task` field for the dotted Python path of the decorated task. You can also pass an imported `@shared_task`/`@stashed_task` object to `task`. `task_name` is managed by django-qstash and mirrors the selected task path.
 - `args` and `kwargs` are the arguments to pass to the task
 - `cron` is the cron schedule to run the task. Use [contrab.guru](https://crontab.guru/) for writing the cron format.
 
