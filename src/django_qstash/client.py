@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import warnings
+from typing import Any
 from urllib.parse import urlparse
 
 from qstash import QStash
@@ -12,8 +13,8 @@ QSTASH_URL = os.environ.get("QSTASH_URL", None)
 UPSTASH_QSTASH_DOMAINS = ["upstash.io", "upstash.cloud", "upstash.com"]
 
 
-def init_qstash():
-    kwargs = {
+def init_qstash() -> QStash:
+    kwargs: dict[str, Any] = {
         "token": QSTASH_TOKEN,
     }
     if QSTASH_URL is not None:

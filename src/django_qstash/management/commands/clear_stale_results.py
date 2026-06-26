@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from typing import Any
+
 from django.conf import settings
 from django.core.management.base import BaseCommand
+from django.core.management.base import CommandParser
 
 from django_qstash.results.tasks import clear_stale_results_task
 
@@ -12,7 +15,7 @@ class Command(BaseCommand):
     help = f"""Clears stale task results older than\n
     {DJANGO_QSTASH_RESULT_TTL} seconds (settings.DJANGO_QSTASH_RESULT_TTL)"""
 
-    def add_arguments(self, parser):
+    def add_arguments(self, parser: CommandParser) -> None:
         parser.add_argument(
             "--no-input",
             action="store_true",
@@ -27,7 +30,7 @@ class Command(BaseCommand):
             "--delay", action="store_true", help="Offload request using django_qstash"
         )
 
-    def handle(self, *args, **options):
+    def handle(self, *args: Any, **options: Any) -> None:
         delay = options["delay"]
         no_input = options["no_input"]
         since = options.get("since") or DJANGO_QSTASH_RESULT_TTL

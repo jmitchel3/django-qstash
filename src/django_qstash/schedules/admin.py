@@ -1,14 +1,25 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+from typing import Any
+
 from django.contrib import admin
+from qstash.schedule import Schedule
 
 from django_qstash.schedules import services
 from django_qstash.schedules.forms import TaskScheduleForm
 from django_qstash.schedules.models import TaskSchedule
 
+# admin.ModelAdmin is generic for type checkers (django-stubs) but is not
+# subscriptable at runtime, so only parametrize it under TYPE_CHECKING.
+if TYPE_CHECKING:
+    _TaskScheduleAdminBase = admin.ModelAdmin[TaskSchedule]
+else:
+    _TaskScheduleAdminBase = admin.ModelAdmin
+
 
 @admin.register(TaskSchedule)
-class TaskScheduleAdmin(admin.ModelAdmin):
+class TaskScheduleAdmin(_TaskScheduleAdminBase):
     list_display = [
         "schedule_id",
         "display_task_name",
@@ -96,7 +107,9 @@ class TaskScheduleAdmin(admin.ModelAdmin):
     ]
 
     @admin.display(description="Raw")
-    def get_qstash_schedule_details(self, obj: TaskSchedule) -> dict:
+    def get_qstash_schedule_details(
+        self, obj: TaskSchedule
+    ) -> str | Schedule | dict[Any, Any] | None:
         if not obj.schedule_id:
             return "No schedule ID yet"
         return services.get_task_schedule_from_qstash(obj, as_dict=True)

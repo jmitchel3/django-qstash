@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
+from typing import cast
 
 from django.db import transaction
 from qstash.schedule import Schedule
@@ -33,34 +35,34 @@ def sync_state_changes(instance: TaskSchedule) -> None:
     """Handle pause/resume state changes."""
     if instance.did_just_resume():
         try:
-            qstash_client.schedule.resume(instance.schedule_id)
+            qstash_client.schedule.resume(cast(str, instance.schedule_id))
         except Exception:
             logger.exception("Failed to resume schedule %s", instance.schedule_id)
     elif instance.did_just_pause():
         try:
-            qstash_client.schedule.pause(instance.schedule_id)
+            qstash_client.schedule.pause(cast(str, instance.schedule_id))
         except Exception:
             logger.exception("Failed to pause schedule %s", instance.schedule_id)
 
 
 def get_task_schedule_from_qstash(
     instance: TaskSchedule, as_dict: bool = False
-) -> Schedule | dict | None:
+) -> Schedule | dict[Any, Any] | None:
     """Get a schedule from QStash."""
     try:
-        response = qstash_client.schedule.get(instance.schedule_id)
+        response = qstash_client.schedule.get(cast(str, instance.schedule_id))
     except Exception:
         logger.exception("Failed to lookup schedule %s", instance.schedule_id)
         return None
-    if response:
-        return response.__dict__ if as_dict else response
-    return None
+    # schedule.get always returns a Schedule (it raises on lookup failure).
+    result: Schedule | dict[Any, Any] = response.__dict__ if as_dict else response
+    return result
 
 
 def delete_task_schedule_from_qstash(instance: TaskSchedule) -> None:
     """Delete a schedule from QStash."""
     try:
-        qstash_client.schedule.delete(instance.schedule_id)
+        qstash_client.schedule.delete(cast(str, instance.schedule_id))
     except Exception:
         logger.exception("Failed to delete schedule %s", instance.schedule_id)
     return

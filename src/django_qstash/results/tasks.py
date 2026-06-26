@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import timedelta
+from typing import Any
 
 from django.apps import apps
 from django.conf import settings
@@ -17,8 +18,13 @@ logger = logging.getLogger(__name__)
 
 @stashed_task(name="Cleanup Task Results")
 def clear_stale_results_task(
-    since=None, stdout=None, user_confirm=False, exclude_errors=True, *args, **options
-):
+    since: int | None = None,
+    stdout: Any = None,
+    user_confirm: bool = False,
+    exclude_errors: bool = True,
+    *args: Any,
+    **options: Any,
+) -> None:
     delta_seconds = since or DJANGO_QSTASH_RESULT_TTL
     cutoff_date = timezone.now() - timedelta(seconds=delta_seconds)
     TaskResult = None
@@ -78,8 +84,12 @@ def clear_stale_results_task(
 
 @stashed_task(name="Clear Task Error Results")
 def clear_task_errors_task(
-    since=None, stdout=None, user_confirm=False, *args, **options
-):
+    since: int | None = None,
+    stdout: Any = None,
+    user_confirm: bool = False,
+    *args: Any,
+    **options: Any,
+) -> None:
     clear_stale_results_task(
         since=since, stdout=stdout, user_confirm=user_confirm, exclude_errors=False
     )

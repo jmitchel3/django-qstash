@@ -9,5 +9,5 @@ class SchedulesConfig(AppConfig):
     verbose_name = "django_qstash_schedules"
     default_auto_field = "django.db.models.BigAutoField"
 
-    def ready(self):
+    def ready(self) -> None:
         import django_qstash.schedules.signals  # noqa

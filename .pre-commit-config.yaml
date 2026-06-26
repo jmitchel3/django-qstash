@@ -75,6 +75,15 @@ repos:
   - id: djade
 - repo: local
   hooks:
+  - id: mypy
+    name: Run mypy on src
+    # Run in the project env (via uv) because the django-stubs mypy plugin
+    # imports the Django app, which needs runtime deps (qstash, requests).
+    entry: uv run mypy src/
+    language: system
+    types: [python]
+    pass_filenames: false
+    require_serial: true
   - id: makemigrations
     name: Run makemigrations on sample_project
     entry: bash -c 'cd sample_project && uv run python manage.py makemigrations --check --dry-run'

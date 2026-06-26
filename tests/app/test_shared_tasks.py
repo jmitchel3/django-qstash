@@ -11,6 +11,9 @@ from django.core.exceptions import ImproperlyConfigured
 from django_qstash.app import stashed_task
 from django_qstash.app.base import AsyncResult
 from django_qstash.app.base import QStashTask
+from django_qstash.app.base import _delay
+from django_qstash.app.base import _supported_kwargs
+from django_qstash.app.base import _timestamp
 
 
 @stashed_task
@@ -21,6 +24,11 @@ def sample_task(x, y):
 @stashed_task(name="custom_task", deduplicated=True)
 def sample_task_with_options(x, y):
     return x * y
+
+
+@stashed_task(delay_seconds=30)
+def sample_task_with_delay_seconds(x, y):
+    return x + y
 
 
 class Calculator:
@@ -166,6 +174,79 @@ class TestQStashTasks:
         monkeypatch.setattr("django_qstash.app.base.QSTASH_TOKEN", "")
         with pytest.raises(ImproperlyConfigured):
             sample_task(2, 3)
+
+
+class TestTimestampHelper:
+    def test_naive_datetime_assumes_utc(self):
+        """A naive datetime is treated as UTC before conversion."""
+        naive = datetime(2026, 6, 21, 12, 0)
+        aware = datetime(2026, 6, 21, 12, 0, tzinfo=timezone.utc)
+        assert _timestamp(naive) == int(aware.timestamp())
+
+    def test_int_passthrough(self):
+        """An int/float eta is passed straight through as an int."""
+        assert _timestamp(1000) == 1000
+        assert _timestamp(1000.9) == 1000
+
+
+class TestDelayHelper:
+    def test_non_int_passthrough(self):
+        """Non-int delay values (e.g. strings) are returned unchanged."""
+        assert _delay("30s") == "30s"
+
+    def test_bool_passthrough(self):
+        """Booleans are not treated as integer seconds."""
+        assert _delay(True) is True
+
+
+class TestSupportedKwargs:
+    def test_all_supported_returns_options(self):
+        """When every option maps to a signature parameter, options pass through."""
+
+        def method(url=None, body=None, delay=None):
+            return None
+
+        options = {"delay": "30s"}
+        assert _supported_kwargs(method, options) == options
+
+    def test_unsupported_option_raises(self):
+        """An option missing from the signature raises ImproperlyConfigured."""
+
+        def method(url=None, body=None):
+            return None
+
+        with pytest.raises(ImproperlyConfigured):
+            _supported_kwargs(method, {"flow_control": {"key": "x"}})
+
+
+@pytest.mark.django_db
+class TestMessageOptionBranches:
+    def test_delay_seconds_sets_delay(self, mock_qstash_client):
+        """A task configured with delay_seconds sets the delay option."""
+        sample_task_with_delay_seconds.delay(2, 3)
+
+        call_kwargs = mock_qstash_client.message.publish_json.call_args.kwargs
+        assert call_kwargs["delay"] == "30s"
+
+    def test_deduplicated_option_sets_content_based_dedup(self, mock_qstash_client):
+        """Passing deduplicated= maps to content_based_deduplication."""
+        sample_task.apply_async(args=(2, 3), deduplicated=True)
+
+        call_kwargs = mock_qstash_client.message.publish_json.call_args.kwargs
+        assert call_kwargs["content_based_deduplication"] is True
+
+    def test_task_deduplicated_flag_sets_content_based_dedup(self, mock_qstash_client):
+        """A task constructed with deduplicated=True enables content dedup."""
+        sample_task_with_options.delay(4, 5)
+
+        call_kwargs = mock_qstash_client.message.publish_json.call_args.kwargs
+        assert call_kwargs["content_based_deduplication"] is True
+
+    def test_enqueue_without_func_raises(self):
+        """_enqueue raises when the task does not wrap a function."""
+        task = QStashTask()
+        with pytest.raises(ImproperlyConfigured):
+            task._enqueue(args=(), kwargs={})
 
 
 class TestAsyncResult:
