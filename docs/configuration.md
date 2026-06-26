@@ -115,6 +115,72 @@ DJANGO_QSTASH_FORCE_HTTPS = False
 - When using a local QStash instance via Docker
 - When your reverse proxy handles SSL termination and passes HTTP to Django
 
+### `DJANGO_QSTASH_DEDUP_SUCCESSFUL`
+
+- **Type**: `bool`
+- **Required**: No
+- **Default**: `True`
+
+QStash delivers webhooks **at-least-once**, so the same message can arrive more
+than once (for example, if your app responds slowly and QStash retries). When
+this setting is `True`, the webhook handler checks whether the incoming
+message's task already has a `SUCCESS` result and, if so, skips re-execution and
+returns `200` with `{"status": "duplicate"}`. This prevents side effects from
+running twice on redelivery.
+
+A prior **failed** attempt does not suppress execution: QStash retries failures
+on purpose, so those still run. Set this to `False` only if your tasks are
+already idempotent and you want to skip the extra lookup.
+
+```python
+DJANGO_QSTASH_DEDUP_SUCCESSFUL = True
+```
+
+**Note**: This check is a no-op unless `django_qstash.results` is installed
+(there is nowhere to record a prior success without it).
+
+### `DJANGO_QSTASH_ALWAYS_EAGER`
+
+- **Type**: `bool`
+- **Required**: No
+- **Default**: `False`
+
+When `True`, `.delay()` and `.apply_async()` execute the task inline in the
+calling process instead of publishing to QStash. No `QSTASH_TOKEN`,
+`DJANGO_QSTASH_DOMAIN`, or network access is required. This mirrors Celery's
+`CELERY_TASK_ALWAYS_EAGER` and is intended for unit tests and local development.
+
+```python
+# In your test settings
+DJANGO_QSTASH_ALWAYS_EAGER = True
+```
+
+With this enabled, `.delay()`/`.apply_async()` return an `EagerResult` whose
+`.get()` returns the task's return value (or re-raises its exception):
+
+```python
+result = my_task.delay(2, 3)
+assert result.get() == 5
+```
+
+See also [`QStashTask.apply()`](api-reference.md), which runs a task inline
+regardless of this setting.
+
+### `DJANGO_QSTASH_RESULT_POLL_INTERVAL`
+
+- **Type**: `float`
+- **Required**: No
+- **Default**: `0.5`
+
+Number of seconds `AsyncResult.get()` waits between polls of the results
+backend while waiting for a task to finish. Only relevant when
+`django_qstash.results` is installed and you call `.get()` on the result of a
+real (non-eager) `.delay()`/`.apply_async()`.
+
+```python
+DJANGO_QSTASH_RESULT_POLL_INTERVAL = 0.5
+```
+
 ### `DJANGO_QSTASH_RESULT_TTL`
 
 - **Type**: `int`
@@ -297,12 +363,13 @@ django-qstash will raise warnings or errors for misconfiguration:
 
 ### Missing Required Settings
 
-If `QSTASH_TOKEN` or `DJANGO_QSTASH_DOMAIN` is not set:
-
-```
-RuntimeWarning: DJANGO_SETTINGS_MODULE (settings.py required) requires
-QSTASH_TOKEN and DJANGO_QSTASH_DOMAIN should be set for QStash functionality
-```
+Settings are read lazily (at the moment they are used), so importing
+django-qstash before Django settings are configured is safe and does not emit
+warnings. If `QSTASH_TOKEN` or `DJANGO_QSTASH_DOMAIN` is missing when you try to
+enqueue or run a task, an `ImproperlyConfigured` error is raised at that point
+(see [Task Execution Without Configuration](#task-execution-without-configuration)).
+Eager execution (`DJANGO_QSTASH_ALWAYS_EAGER` or `.apply()`) does not require
+these settings.
 
 ### Non-Production QStash URL
 

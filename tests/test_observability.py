@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 from django.http import HttpRequest
+from django.test import override_settings
 
 from django_qstash.handlers import QStashWebhook
 from django_qstash.handlers import correlation_id
@@ -523,7 +524,7 @@ class TestSignalEmission:
                 patch(
                     "django_qstash.handlers.discover_tasks", return_value=["test.path"]
                 ),
-                patch("django_qstash.handlers.DJANGO_QSTASH_EMIT_SIGNALS", False),
+                override_settings(DJANGO_QSTASH_EMIT_SIGNALS=False),
             ):
                 webhook.execute_task(payload)
 
@@ -558,7 +559,7 @@ class TestLogTaskArgsSettings:
             patch("django_qstash.handlers.utils.import_string", return_value=mock_func),
             patch("django_qstash.handlers.discover_tasks", return_value=["test.path"]),
             patch("django_qstash.handlers.logger") as mock_logger,
-            patch("django_qstash.handlers.DJANGO_QSTASH_LOG_TASK_ARGS", False),
+            override_settings(DJANGO_QSTASH_LOG_TASK_ARGS=False),
             patch("django_qstash.handlers._emit_signal"),
         ):
             webhook.execute_task(payload)
@@ -588,7 +589,7 @@ class TestLogTaskArgsSettings:
             patch("django_qstash.handlers.utils.import_string", return_value=mock_func),
             patch("django_qstash.handlers.discover_tasks", return_value=["test.path"]),
             patch("django_qstash.handlers.logger") as mock_logger,
-            patch("django_qstash.handlers.DJANGO_QSTASH_LOG_TASK_ARGS", True),
+            override_settings(DJANGO_QSTASH_LOG_TASK_ARGS=True),
             patch("django_qstash.handlers._emit_signal"),
         ):
             webhook.execute_task(payload)

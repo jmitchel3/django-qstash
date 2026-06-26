@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 from django.http import HttpRequest
+from django.test import override_settings
 
 from django_qstash.db.models import TaskStatus
 from django_qstash.exceptions import PayloadError
@@ -213,6 +214,90 @@ class TestQStashWebhook:
         assert response["error_type"] == "InternalServerError"
         mock_store.assert_called_once()
         assert mock_store.call_args[1]["status"] == TaskStatus.INTERNAL_ERROR
+
+
+def _signed_request(message_id="dup-1"):
+    request = Mock(spec=HttpRequest)
+    request.body = json.dumps(
+        {"function": "test_func", "module": "test_module", "args": [], "kwargs": {}}
+    ).encode()
+    request.headers = {
+        "Upstash-Signature": "valid",
+        "Upstash-Message-Id": message_id,
+    }
+    request.META = {"REMOTE_ADDR": "127.0.0.1"}
+    request.build_absolute_uri.return_value = "https://example.com"
+    return request
+
+
+class TestIdempotency:
+    """Redelivery of an already-succeeded message is skipped (at-least-once)."""
+
+    @pytest.fixture
+    def webhook(self):
+        return QStashWebhook()
+
+    def test_duplicate_success_is_skipped(self, webhook):
+        from django_qstash.results.services import store_task_result
+
+        store_task_result(
+            task_id="dup-1",
+            task_name="test_module.test_func",
+            status=TaskStatus.SUCCESS,
+            result="prior",
+        )
+        request = _signed_request("dup-1")
+        with (
+            patch.object(webhook, "verify_signature"),
+            patch.object(webhook, "execute_task") as mock_execute,
+        ):
+            response, status = webhook.handle_request(request)
+
+        assert status == 200
+        assert response["status"] == "duplicate"
+        mock_execute.assert_not_called()
+
+    def test_prior_failure_still_executes(self, webhook):
+        """A prior non-success row does not suppress execution (retries work)."""
+        from django_qstash.results.services import store_task_result
+
+        store_task_result(
+            task_id="dup-2",
+            task_name="test_module.test_func",
+            status=TaskStatus.EXECUTION_ERROR,
+            traceback="boom",
+        )
+        request = _signed_request("dup-2")
+        with (
+            patch.object(webhook, "verify_signature"),
+            patch.object(webhook, "execute_task", return_value="ok") as mock_execute,
+        ):
+            response, status = webhook.handle_request(request)
+
+        assert status == 200
+        assert response["status"] == "success"
+        mock_execute.assert_called_once()
+
+    @override_settings(DJANGO_QSTASH_DEDUP_SUCCESSFUL=False)
+    def test_dedup_disabled_re_executes(self, webhook):
+        from django_qstash.results.services import store_task_result
+
+        store_task_result(
+            task_id="dup-3",
+            task_name="test_module.test_func",
+            status=TaskStatus.SUCCESS,
+            result="prior",
+        )
+        request = _signed_request("dup-3")
+        with (
+            patch.object(webhook, "verify_signature"),
+            patch.object(webhook, "execute_task", return_value="ok") as mock_execute,
+        ):
+            response, status = webhook.handle_request(request)
+
+        assert status == 200
+        assert response["status"] == "success"
+        mock_execute.assert_called_once()
 
 
 class TestEnsureHttps:

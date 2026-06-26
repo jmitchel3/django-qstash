@@ -7,13 +7,19 @@ from unittest.mock import patch
 
 import pytest
 from django.core.exceptions import ImproperlyConfigured
+from django.test import override_settings
 
 from django_qstash.app import stashed_task
 from django_qstash.app.base import AsyncResult
+from django_qstash.app.base import EagerResult
 from django_qstash.app.base import QStashTask
 from django_qstash.app.base import _delay
 from django_qstash.app.base import _supported_kwargs
 from django_qstash.app.base import _timestamp
+from django_qstash.db.models import TaskStatus
+from django_qstash.exceptions import TaskResultError
+from django_qstash.exceptions import TaskTimeoutError
+from django_qstash.results.services import store_task_result
 
 
 @stashed_task
@@ -169,11 +175,11 @@ class TestQStashTasks:
         """Accessing a task on the class returns the QStashTask descriptor."""
         assert isinstance(Calculator.double, QStashTask)
 
-    def test_missing_config_raises(self, monkeypatch):
+    def test_missing_config_raises(self):
         """Missing QSTASH_TOKEN/DOMAIN raises ImproperlyConfigured on call."""
-        monkeypatch.setattr("django_qstash.app.base.QSTASH_TOKEN", "")
-        with pytest.raises(ImproperlyConfigured):
-            sample_task(2, 3)
+        with override_settings(QSTASH_TOKEN=""):
+            with pytest.raises(ImproperlyConfigured):
+                sample_task(2, 3)
 
 
 class TestTimestampHelper:
@@ -249,13 +255,187 @@ class TestMessageOptionBranches:
             task._enqueue(args=(), kwargs={})
 
 
+@stashed_task
+async def sample_async_task(x, y):
+    return x + y
+
+
+@stashed_task
+def failing_task():
+    raise ValueError("boom")
+
+
 class TestAsyncResult:
     def test_id_property(self):
         result = AsyncResult("abc-123")
         assert result.id == "abc-123"
         assert result.task_id == "abc-123"
 
-    def test_get_not_implemented(self):
-        result = AsyncResult("abc-123")
-        with pytest.raises(NotImplementedError):
+    @pytest.mark.django_db
+    def test_pending_when_no_row(self):
+        """Status is PENDING and result is None until a backend row exists."""
+        result = AsyncResult("no-such-id")
+        assert result.status == TaskStatus.PENDING
+        assert result.state == TaskStatus.PENDING
+        assert result.ready() is False
+        assert result.successful() is False
+        assert result.result is None
+
+    @pytest.mark.django_db
+    def test_reads_success_from_backend(self):
+        """status/result/get() resolve from a stored SUCCESS TaskResult row."""
+        store_task_result(
+            task_id="msg-1",
+            task_name="t",
+            status=TaskStatus.SUCCESS,
+            result=42,
+        )
+        result = AsyncResult("msg-1")
+        assert result.status == TaskStatus.SUCCESS
+        assert result.ready() is True
+        assert result.successful() is True
+        # 42 was wrapped as {"result": 42}; AsyncResult unwraps it.
+        assert result.result == 42
+        assert result.get(timeout=1) == 42
+
+    @pytest.mark.django_db
+    def test_dict_result_is_not_unwrapped(self):
+        """A genuine multi-key dict result round-trips unchanged."""
+        store_task_result(
+            task_id="msg-dict",
+            task_name="t",
+            status=TaskStatus.SUCCESS,
+            result={"a": 1, "b": 2},
+        )
+        assert AsyncResult("msg-dict").result == {"a": 1, "b": 2}
+
+    @pytest.mark.django_db
+    def test_get_propagates_failure(self):
+        """get() raises TaskResultError for a failed task, carrying traceback."""
+        store_task_result(
+            task_id="msg-2",
+            task_name="t",
+            status=TaskStatus.EXECUTION_ERROR,
+            traceback="Traceback: boom",
+        )
+        result = AsyncResult("msg-2")
+        assert result.failed() is True
+        with pytest.raises(TaskResultError, match="boom"):
+            result.get(timeout=1)
+
+    @pytest.mark.django_db
+    def test_get_no_propagate_returns_result(self):
+        """get(propagate=False) returns the stored value instead of raising."""
+        store_task_result(
+            task_id="msg-3",
+            task_name="t",
+            status=TaskStatus.EXECUTION_ERROR,
+            traceback="boom",
+        )
+        assert AsyncResult("msg-3").get(timeout=1, propagate=False) is None
+
+    @pytest.mark.django_db
+    def test_get_times_out(self):
+        """get() raises TaskTimeoutError when no terminal row arrives in time."""
+        result = AsyncResult("never")
+        with pytest.raises(TaskTimeoutError):
+            result.get(timeout=0.05, interval=0.01)
+
+    @pytest.mark.django_db
+    def test_traceback_property(self):
+        """traceback exposes the stored traceback string (or None)."""
+        assert AsyncResult("missing").traceback is None
+        store_task_result(
+            task_id="msg-tb",
+            task_name="t",
+            status=TaskStatus.EXECUTION_ERROR,
+            traceback="the traceback",
+        )
+        assert AsyncResult("msg-tb").traceback == "the traceback"
+
+    def test_pending_when_results_app_missing(self):
+        """When the results model is unavailable, status falls back to PENDING."""
+        with patch("django_qstash.app.base.apps.get_model", side_effect=LookupError):
+            result = AsyncResult("any")
+            assert result.status == TaskStatus.PENDING
+            assert result.result is None
+
+
+class TestApply:
+    def test_apply_runs_inline_and_returns_value(self):
+        """apply() executes the task body and captures the return value."""
+        result = sample_task.apply(args=(2, 3))
+        assert isinstance(result, EagerResult)
+        assert result.successful() is True
+        assert result.result == 5
+        assert result.get() == 5
+
+    def test_apply_requires_no_qstash_config(self):
+        """apply() works even when QStash token/domain are unset."""
+        with override_settings(QSTASH_TOKEN="", DJANGO_QSTASH_DOMAIN=""):
+            assert sample_task.apply(args=(4, 5)).get() == 9
+
+    def test_apply_captures_exception(self):
+        """A raising task yields a failed EagerResult that re-raises on get()."""
+        result = failing_task.apply()
+        assert result.failed() is True
+        assert result.status == TaskStatus.EXECUTION_ERROR
+        assert result.traceback is not None
+        with pytest.raises(ValueError, match="boom"):
             result.get()
+
+    def test_apply_get_no_propagate_returns_exception(self):
+        """get(propagate=False) returns the captured exception instead of raising."""
+        result = failing_task.apply()
+        returned = result.get(propagate=False)
+        assert isinstance(returned, ValueError)
+
+    def test_apply_runs_async_task(self):
+        """apply() runs coroutine task functions to completion."""
+        assert sample_async_task.apply(args=(2, 3)).get() == 5
+
+    def test_eager_result_state_and_ready(self):
+        """EagerResult exposes Celery-style state/ready accessors."""
+        result = sample_task.apply(args=(1, 1))
+        assert result.state == TaskStatus.SUCCESS
+        assert result.ready() is True
+
+    def test_run_without_func_raises(self):
+        """_run on a task that wraps no function raises ImproperlyConfigured."""
+        task = QStashTask()
+        with pytest.raises(ImproperlyConfigured):
+            task.actual_func()
+
+
+class TestAlwaysEager:
+    @override_settings(DJANGO_QSTASH_ALWAYS_EAGER=True)
+    def test_delay_runs_inline(self, mock_qstash_client):
+        """With ALWAYS_EAGER, delay() runs inline and skips QStash."""
+        result = sample_task.delay(2, 3)
+        assert isinstance(result, EagerResult)
+        assert result.get() == 5
+        mock_qstash_client.message.publish_json.assert_not_called()
+
+    @override_settings(DJANGO_QSTASH_ALWAYS_EAGER=True)
+    def test_apply_async_runs_inline(self, mock_qstash_client):
+        """With ALWAYS_EAGER, apply_async() runs inline and skips QStash."""
+        result = sample_task.apply_async(args=(4, 5))
+        assert result.get() == 9
+        mock_qstash_client.message.publish_json.assert_not_called()
+
+    @override_settings(
+        DJANGO_QSTASH_ALWAYS_EAGER=True, QSTASH_TOKEN="", DJANGO_QSTASH_DOMAIN=""
+    )
+    def test_eager_needs_no_config(self, mock_qstash_client):
+        """Eager delay() does not require QStash token/domain."""
+        assert sample_task.delay(1, 1).get() == 2
+
+
+class TestActualFunc:
+    def test_actual_func_runs_sync(self):
+        """actual_func runs the wrapped sync function directly."""
+        assert sample_task.actual_func(2, 3) == 5
+
+    def test_actual_func_runs_async(self):
+        """actual_func runs a coroutine task function to completion."""
+        assert sample_async_task.actual_func(2, 3) == 5

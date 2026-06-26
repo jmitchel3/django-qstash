@@ -1,63 +1,42 @@
 from __future__ import annotations
 
-import warnings
-
 from django.test import TestCase
 from django.test import override_settings
 
-from django_qstash.settings import DJANGO_QSTASH_WEBHOOK_PATH
+import django_qstash.settings
+from django_qstash.settings import qstash_settings
 
 
 class SettingsTestCase(TestCase):
     def test_default_webhook_path(self):
-        """Test that default webhook path is set correctly"""
-        self.assertEqual(DJANGO_QSTASH_WEBHOOK_PATH, "/qstash/webhook/")
+        """The default webhook path is exposed when not overridden."""
+        self.assertEqual(qstash_settings.DJANGO_QSTASH_WEBHOOK_PATH, "/qstash/webhook/")
 
-    def test_warning_when_required_settings_missing(self):
-        """Test that warning is raised when required settings are missing"""
-        with override_settings(QSTASH_TOKEN=None, DJANGO_QSTASH_DOMAIN=None):
-            with warnings.catch_warnings(record=True) as w:
-                warnings.simplefilter("always")
+    def test_module_level_lazy_access(self):
+        """Module-level attribute access stays available for back-compat."""
+        self.assertEqual(
+            django_qstash.settings.DJANGO_QSTASH_WEBHOOK_PATH, "/qstash/webhook/"
+        )
 
-                # Force reload of settings to trigger warning
-                from importlib import reload
-
-                import django_qstash.settings
-
-                reload(django_qstash.settings)
-
-                self.assertEqual(len(w), 1)
-                self.assertTrue(issubclass(w[0].category, RuntimeWarning))
-                self.assertIn(
-                    "QSTASH_TOKEN and DJANGO_QSTASH_DOMAIN should be set",
-                    str(w[0].message),
-                )
-
-    @override_settings(QSTASH_TOKEN="test-token", DJANGO_QSTASH_DOMAIN="example.com")
-    def test_no_warning_when_settings_present(self):
-        """Test that no warning is raised when required settings are present"""
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-
-            # Force reload of settings
-            from importlib import reload
-
-            import django_qstash.settings
-
-            reload(django_qstash.settings)
-
-            self.assertEqual(len(w), 0)
+    def test_unknown_setting_raises(self):
+        """Accessing an unknown setting raises AttributeError."""
+        with self.assertRaises(AttributeError):
+            qstash_settings.NOT_A_REAL_SETTING
 
     @override_settings(DJANGO_QSTASH_WEBHOOK_PATH="/custom/webhook/path/")
-    def test_custom_webhook_path(self):
-        """Test that custom webhook path can be set"""
-        # Force reload of settings to get new webhook path
-        from importlib import reload
-
-        import django_qstash.settings
-
-        reload(django_qstash.settings)
-
+    def test_override_settings_takes_effect_without_reload(self):
+        """Lazy access means @override_settings is reflected immediately."""
+        self.assertEqual(
+            qstash_settings.DJANGO_QSTASH_WEBHOOK_PATH, "/custom/webhook/path/"
+        )
         self.assertEqual(
             django_qstash.settings.DJANGO_QSTASH_WEBHOOK_PATH, "/custom/webhook/path/"
         )
+
+    def test_eager_default_is_false(self):
+        """ALWAYS_EAGER defaults to False so production behavior is unchanged."""
+        self.assertFalse(qstash_settings.DJANGO_QSTASH_ALWAYS_EAGER)
+
+    @override_settings(DJANGO_QSTASH_ALWAYS_EAGER=True)
+    def test_eager_setting_reflected(self):
+        self.assertTrue(qstash_settings.DJANGO_QSTASH_ALWAYS_EAGER)

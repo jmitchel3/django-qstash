@@ -10,8 +10,11 @@ This document provides detailed documentation for all public APIs in django-qsta
 - [Task Methods](#task-methods)
   - [.delay()](#delay)
   - [.apply_async()](#apply_async)
+  - [.apply()](#apply)
   - [Direct Execution](#direct-execution)
+- [Testing Tasks (Eager Mode)](#testing-tasks-eager-mode)
 - [AsyncResult](#asyncresult)
+  - [EagerResult](#eagerresult)
 - [Models](#models)
   - [TaskResult](#taskresult-model)
   - [TaskSchedule](#taskschedule-model)
@@ -151,7 +154,9 @@ All positional and keyword arguments are passed directly to the task function.
 
 #### Returns
 
-An `AsyncResult` object containing the task ID.
+An `AsyncResult` object containing the task ID. When
+`DJANGO_QSTASH_ALWAYS_EAGER` is enabled, the task runs inline and an
+`EagerResult` is returned instead (see [Testing Tasks](#testing-tasks-eager-mode)).
 
 #### Example
 
@@ -230,6 +235,58 @@ send_email.apply_async(args=("user@example.com",), max_retries=5)
 
 ---
 
+### `.apply()`
+
+Execute the task **synchronously** in the current process and return an
+[`EagerResult`](#eagerresult) carrying the return value (or the raised
+exception). This is the Celery `Task.apply()` equivalent and is the primary
+tool for unit-testing code that enqueues tasks: it requires no `QSTASH_TOKEN`,
+no `DJANGO_QSTASH_DOMAIN`, and makes no network calls.
+
+#### Signature
+
+```python
+def apply(
+    self,
+    args: tuple | None = None,
+    kwargs: dict | None = None,
+    **options: dict[str, Any],
+) -> EagerResult:
+    ...
+```
+
+#### Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `args` | `tuple` | `None` | Positional arguments for the task |
+| `kwargs` | `dict` | `None` | Keyword arguments for the task |
+| `**options` | `dict` | `{}` | Accepted for Celery compatibility and ignored (delivery options have no meaning inline) |
+
+#### Returns
+
+An [`EagerResult`](#eagerresult) holding the task's return value or exception.
+
+#### Examples
+
+```python
+from myapp.tasks import add
+
+result = add.apply(args=(2, 3))
+assert result.get() == 5
+assert result.status == "SUCCESS"
+
+# A task that raises is captured; get() re-raises it (propagate defaults to True)
+result = add.apply(args=("bad", "input"))
+assert result.failed()
+result.get()  # re-raises the original exception
+```
+
+`async def` tasks are supported: `apply()` runs them to completion via
+`asgiref.sync.async_to_sync`, so `result.get()` returns the resolved value.
+
+---
+
 ### Direct Execution
 
 Tasks can be called directly like normal functions (without going through QStash):
@@ -242,15 +299,60 @@ result = send_email("user@example.com", subject="Test", body="Hello")
 ```
 
 This is useful for:
-- Testing tasks locally
 - Running tasks synchronously when needed
 - Debugging task logic
+
+For testing, prefer [`.apply()`](#apply) or
+[eager mode](#testing-tasks-eager-mode), which capture the result and do not
+require QStash configuration.
+
+---
+
+## Testing Tasks (Eager Mode)
+
+Two mechanisms let you run tasks inline without a QStash token, domain, or
+network access, mirroring Celery's eager testing story:
+
+1. **`.apply()`** runs a single task synchronously and returns an
+   [`EagerResult`](#eagerresult). Use it when you want to call a task directly
+   in a test and assert on its result.
+
+2. **`DJANGO_QSTASH_ALWAYS_EAGER = True`** makes every `.delay()` /
+   `.apply_async()` call run inline and return an `EagerResult`, so the code
+   under test does not need to change. Set this in your test settings.
+
+```python
+# test_settings.py
+DJANGO_QSTASH_ALWAYS_EAGER = True
+```
+
+```python
+# In a test
+from myapp.tasks import add
+
+
+def test_add_task():
+    result = add.delay(2, 3)  # runs inline because ALWAYS_EAGER is on
+    assert result.get() == 5
+```
+
+Eager execution preserves the exact return value (no results-backend
+round-trip), so types such as `int`, `list`, and custom dicts come back
+unchanged.
 
 ---
 
 ## AsyncResult
 
-A minimal Celery-compatible result object returned by `.delay()` and `.apply_async()`.
+A Celery-compatible result handle returned by `.delay()` and `.apply_async()`.
+When `django_qstash.results` is installed, it is backed by the
+[`TaskResult`](#taskresult-model) table: it looks up rows by the QStash message
+id (`task_id`) so you can read a task's status and result after the webhook has
+run. Results are **eventually consistent**: until the webhook executes the task,
+the status is `PENDING`.
+
+If `django_qstash.results` is not installed, the status is always `PENDING` and
+`.get()` will time out.
 
 ### Properties
 
@@ -258,30 +360,68 @@ A minimal Celery-compatible result object returned by `.delay()` and `.apply_asy
 |----------|------|-------------|
 | `task_id` | `str` | The QStash message ID |
 | `id` | `str` | Alias for `task_id` |
+| `status` | `str` | Latest [`TaskStatus`](#taskstatus) for the task, or `PENDING` |
+| `state` | `str` | Alias for `status` |
+| `result` | `Any` | The task's return value once available, else `None` |
+| `traceback` | `str \| None` | Stored traceback string if the task failed |
 
 ### Methods
+
+| Method | Description |
+|--------|-------------|
+| `ready()` | `True` once a terminal result row exists |
+| `successful()` | `True` if the task finished with `SUCCESS` |
+| `failed()` | `True` if the task finished with an error status |
 
 #### `.get()`
 
 ```python
-def get(self, timeout: int | None = None) -> Any:
+def get(
+    self,
+    timeout: float | None = None,
+    interval: float | None = None,
+    propagate: bool = True,
+) -> Any:
     ...
 ```
 
-**Note**: This method raises `NotImplementedError` because QStash does not support result retrieval in the same way as Celery. Use the `TaskResult` model if you need to access results.
+Blocks until a terminal result is stored, polling the results backend every
+`interval` seconds (defaults to `DJANGO_QSTASH_RESULT_POLL_INTERVAL`). With
+`timeout=None` (the default) it waits indefinitely; otherwise it raises
+`TaskTimeoutError` once `timeout` seconds elapse. If the task failed and
+`propagate` is `True`, it raises `TaskResultError` carrying the stored
+traceback.
 
 ### Example
 
 ```python
 result = my_task.delay(arg1, arg2)
 
-# Access the task ID
-print(f"Task ID: {result.task_id}")
-print(f"Task ID: {result.id}")  # Same as above
+print(f"Task ID: {result.id}")
 
-# This will raise NotImplementedError
-# result.get()
+# Poll the results backend for up to 30 seconds
+value = result.get(timeout=30)
+
+# Or inspect without blocking
+if result.ready():
+    print(result.status, result.result)
 ```
+
+### EagerResult
+
+Returned by [`.apply()`](#apply) and by `.delay()` / `.apply_async()` when
+`DJANGO_QSTASH_ALWAYS_EAGER` is enabled. It carries the return value (or
+exception) in memory, so `status`, `result`, and `get()` resolve immediately
+with no database round-trip:
+
+```python
+result = my_task.apply(args=(2, 3))
+assert result.ready() is True
+assert result.get() == 5
+```
+
+For a task that raised, `get()` re-raises the original exception (or returns it
+when called with `propagate=False`).
 
 ---
 
@@ -699,6 +839,25 @@ from django_qstash.exceptions import TaskError
 **Common Causes:**
 - Task function raised an exception
 - Task function could not be imported
+
+### `TaskResultError`
+
+Raised by [`AsyncResult.get()`](#get-1) when resolving a task that did not
+succeed (and `propagate=True`). The original traceback string from the results
+backend is preserved in the message.
+
+```python
+from django_qstash.exceptions import TaskResultError
+```
+
+### `TaskTimeoutError`
+
+Subclass of `TaskResultError`, raised by `AsyncResult.get(timeout=...)` when the
+timeout elapses before a terminal result is stored.
+
+```python
+from django_qstash.exceptions import TaskTimeoutError
+```
 
 ---
 

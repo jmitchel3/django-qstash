@@ -7,6 +7,33 @@ import pytest
 from django_qstash.db.models import TaskStatus
 from django_qstash.results.services import function_result_to_dict
 from django_qstash.results.services import store_task_result
+from django_qstash.results.services import successful_result_exists
+
+
+class TestSuccessfulResultExists:
+    def test_false_when_no_task_id(self):
+        assert successful_result_exists(None) is False
+        assert successful_result_exists("") is False
+
+    @pytest.mark.django_db
+    def test_true_after_success_stored(self):
+        store_task_result(
+            task_id="abc", task_name="t", status=TaskStatus.SUCCESS, result=1
+        )
+        assert successful_result_exists("abc") is True
+
+    @pytest.mark.django_db
+    def test_false_when_only_failure_stored(self):
+        store_task_result(
+            task_id="def", task_name="t", status=TaskStatus.EXECUTION_ERROR
+        )
+        assert successful_result_exists("def") is False
+
+    def test_false_when_results_app_missing(self):
+        with patch(
+            "django_qstash.results.services.apps.get_model", side_effect=LookupError
+        ):
+            assert successful_result_exists("abc") is False
 
 
 class TestFunctionResultToDict:

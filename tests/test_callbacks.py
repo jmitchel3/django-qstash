@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 from django.core.exceptions import ImproperlyConfigured
+from django.test import override_settings
 
 from django_qstash.callbacks import get_callback_url
 from django_qstash.callbacks import validate_domain
@@ -108,22 +109,21 @@ class TestValidateDomain:
 
 
 class TestGetCallbackUrlMisconfigured:
+    @override_settings(DJANGO_QSTASH_DOMAIN=None)
     def test_no_domain_raises(self):
-        with patch("django_qstash.callbacks.DJANGO_QSTASH_DOMAIN", None):
-            with pytest.raises(
-                ImproperlyConfigured, match="DJANGO_QSTASH_DOMAIN is not set"
-            ):
-                get_callback_url()
-
-    def test_no_webhook_path_raises(self):
-        with (
-            patch("django_qstash.callbacks.DJANGO_QSTASH_DOMAIN", "example.com"),
-            patch("django_qstash.callbacks.DJANGO_QSTASH_WEBHOOK_PATH", None),
+        with pytest.raises(
+            ImproperlyConfigured, match="DJANGO_QSTASH_DOMAIN is not set"
         ):
-            with pytest.raises(
-                ImproperlyConfigured, match="DJANGO_QSTASH_WEBHOOK_PATH is not set"
-            ):
-                get_callback_url()
+            get_callback_url()
+
+    @override_settings(
+        DJANGO_QSTASH_DOMAIN="example.com", DJANGO_QSTASH_WEBHOOK_PATH=None
+    )
+    def test_no_webhook_path_raises(self):
+        with pytest.raises(
+            ImproperlyConfigured, match="DJANGO_QSTASH_WEBHOOK_PATH is not set"
+        ):
+            get_callback_url()
 
 
 @pytest.mark.parametrize(
@@ -174,8 +174,7 @@ class TestGetCallbackUrlMisconfigured:
     ],
 )
 def test_get_callback_url(domain, webhook_path, expected):
-    with (
-        patch("django_qstash.callbacks.DJANGO_QSTASH_DOMAIN", domain),
-        patch("django_qstash.callbacks.DJANGO_QSTASH_WEBHOOK_PATH", webhook_path),
+    with override_settings(
+        DJANGO_QSTASH_DOMAIN=domain, DJANGO_QSTASH_WEBHOOK_PATH=webhook_path
     ):
         assert get_callback_url() == expected

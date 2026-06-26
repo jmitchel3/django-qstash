@@ -40,6 +40,27 @@ def function_result_to_dict(result: Any) -> dict[str, Any] | None:
     return {"result": result}
 
 
+def successful_result_exists(task_id: str | None) -> bool:
+    """Return True if a SUCCESS TaskResult already exists for this message id.
+
+    Used by the webhook handler to make redelivery idempotent: QStash is
+    at-least-once, so the same message (same ``task_id``) can arrive more than
+    once. If a prior attempt already succeeded, the task should not run again.
+
+    Returns False when ``task_id`` is missing or the results app is not
+    installed (in which case no dedup is possible).
+    """
+    if not task_id:
+        return False
+    try:
+        TaskResult = apps.get_model("django_qstash_results", "TaskResult")
+    except LookupError:
+        return False
+    return bool(
+        TaskResult.objects.filter(task_id=task_id, status=TaskStatus.SUCCESS).exists()
+    )
+
+
 def store_task_result(
     task_id: str | None,
     task_name: str,
