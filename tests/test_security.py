@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 from django.http import HttpRequest
+from django.test import override_settings
 
 from django_qstash.exceptions import TaskError
 from django_qstash.handlers import QStashWebhook
@@ -59,7 +60,7 @@ class TestPayloadSizeValidation:
         assert status == 200
         assert response["status"] == "success"
 
-    @patch("django_qstash.handlers.DJANGO_QSTASH_MAX_PAYLOAD_SIZE", 100)
+    @override_settings(DJANGO_QSTASH_MAX_PAYLOAD_SIZE=100)
     def test_custom_max_payload_size(self):
         """Test that custom max payload size setting is respected."""
         webhook = QStashWebhook()

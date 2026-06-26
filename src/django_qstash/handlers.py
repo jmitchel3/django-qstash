@@ -16,15 +16,14 @@ from qstash import Receiver
 
 from django_qstash.db.models import TaskStatus
 from django_qstash.discovery.utils import discover_tasks
-from django_qstash.settings import DJANGO_QSTASH_EMIT_SIGNALS
-from django_qstash.settings import DJANGO_QSTASH_LOG_TASK_ARGS
-from django_qstash.settings import DJANGO_QSTASH_MAX_PAYLOAD_SIZE
+from django_qstash.settings import qstash_settings
 
 from . import utils
 from .exceptions import PayloadError
 from .exceptions import SignatureError
 from .exceptions import TaskError
 from .results.services import store_task_result
+from .results.services import successful_result_exists
 
 logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger("django_qstash.audit")
@@ -37,7 +36,7 @@ correlation_id: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 def _emit_signal(signal: Any, **kwargs: Any) -> None:
     """Emit a Django signal if signal emission is enabled."""
-    if DJANGO_QSTASH_EMIT_SIGNALS:
+    if qstash_settings.DJANGO_QSTASH_EMIT_SIGNALS:
         signal.send_robust(sender=None, **kwargs)
 
 
@@ -148,7 +147,7 @@ class QStashWebhook:
             "task": payload.function_path,
             "correlation_id": current_correlation_id,
         }
-        if DJANGO_QSTASH_LOG_TASK_ARGS:
+        if qstash_settings.DJANGO_QSTASH_LOG_TASK_ARGS:
             log_extra["args"] = payload.args
             log_extra["kwargs"] = payload.kwargs
 
@@ -238,6 +237,17 @@ class QStashWebhook:
             function_path=payload.function_path,
         )
 
+    def _error_payload(
+        self, exc: Exception, payload: TaskPayload | None
+    ) -> dict[str, Any]:
+        """Build the standard error response body for a handled exception."""
+        return {
+            "status": "error",
+            "error_type": exc.__class__.__name__,
+            "error": str(exc),
+            "task_name": getattr(payload, "task_name", None),
+        }
+
     def _get_client_ip(self, request: HttpRequest) -> str:
         """Extract client IP from request headers."""
         x_forwarded_for = request.headers.get("x-forwarded-for")
@@ -260,10 +270,11 @@ class QStashWebhook:
 
         try:
             # Check payload size before processing
-            if content_length > DJANGO_QSTASH_MAX_PAYLOAD_SIZE:
+            max_payload_size = qstash_settings.DJANGO_QSTASH_MAX_PAYLOAD_SIZE
+            if content_length > max_payload_size:
                 raise PayloadError(
                     f"Payload size {content_length} bytes exceeds maximum allowed "
-                    f"size of {DJANGO_QSTASH_MAX_PAYLOAD_SIZE} bytes"
+                    f"size of {max_payload_size} bytes"
                 )
 
             body = request.body.decode()
@@ -295,6 +306,27 @@ class QStashWebhook:
                 source_ip=source_ip,
             )
 
+            # Idempotency guard: QStash delivers at-least-once, so the same
+            # message can arrive again (e.g. after a slow response). If this
+            # message's task already succeeded, skip re-execution and ack 200
+            # so QStash stops retrying.
+            if qstash_settings.DJANGO_QSTASH_DEDUP_SUCCESSFUL and (
+                successful_result_exists(task_id)
+            ):
+                audit_logger.info(
+                    "duplicate_delivery_skipped",
+                    extra={
+                        "message_id": task_id,
+                        "task_path": payload.function_path,
+                        "correlation_id": correlation_id.get(""),
+                    },
+                )
+                return {
+                    "status": "duplicate",
+                    "task_name": payload.task_name,
+                    "message_id": task_id,
+                }, 200
+
             result = self.execute_task(payload)
             self._store_result(
                 payload=payload,
@@ -306,17 +338,19 @@ class QStashWebhook:
             return {
                 "status": "success",
                 "task_name": payload.task_name,
-                "result": result if result is not None else "null",
+                # Serialize None as a real JSON null rather than the string "null".
+                "result": result,
             }, 200
 
-        except (SignatureError, PayloadError) as e:
-            logger.exception("Authentication error: %s", str(e))
-            return {
-                "status": "error",
-                "error_type": e.__class__.__name__,
-                "error": str(e),
-                "task_name": getattr(payload, "task_name", None),
-            }, 400
+        except SignatureError as e:
+            logger.exception("Signature verification failed: %s", str(e))
+            return self._error_payload(e, payload), 400
+
+        except PayloadError as e:
+            # A malformed payload is a client/validation error, not an auth
+            # failure; log it distinctly from signature problems.
+            logger.exception("Invalid payload: %s", str(e))
+            return self._error_payload(e, payload), 400
 
         except TaskError as e:
             logger.exception("Task execution error: %s", str(e))

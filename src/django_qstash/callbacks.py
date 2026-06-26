@@ -5,8 +5,7 @@ from urllib.parse import urlparse
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 
-from django_qstash.settings import DJANGO_QSTASH_DOMAIN
-from django_qstash.settings import DJANGO_QSTASH_WEBHOOK_PATH
+from django_qstash.settings import qstash_settings
 
 
 def validate_domain(domain: str) -> str:
@@ -71,12 +70,14 @@ def get_callback_url() -> str:
     """
     Get the callback URL based on the settings.
     """
-    if DJANGO_QSTASH_DOMAIN is None:
+    domain = qstash_settings.DJANGO_QSTASH_DOMAIN
+    webhook_path_setting = qstash_settings.DJANGO_QSTASH_WEBHOOK_PATH
+    if domain is None:
         raise ImproperlyConfigured("DJANGO_QSTASH_DOMAIN is not set")
-    if DJANGO_QSTASH_WEBHOOK_PATH is None:
+    if webhook_path_setting is None:
         raise ImproperlyConfigured("DJANGO_QSTASH_WEBHOOK_PATH is not set")
 
-    callback_domain = validate_domain(DJANGO_QSTASH_DOMAIN)
-    webhook_path = DJANGO_QSTASH_WEBHOOK_PATH.strip("/")
+    callback_domain = validate_domain(domain)
+    webhook_path = webhook_path_setting.strip("/")
 
     return f"{callback_domain}/{webhook_path}/"

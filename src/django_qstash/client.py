@@ -7,7 +7,7 @@ from urllib.parse import urlparse
 
 from qstash import QStash
 
-from django_qstash.settings import QSTASH_TOKEN
+from django_qstash.settings import qstash_settings
 
 QSTASH_URL = os.environ.get("QSTASH_URL", None)
 UPSTASH_QSTASH_DOMAINS = ["upstash.io", "upstash.cloud", "upstash.com"]
@@ -15,7 +15,7 @@ UPSTASH_QSTASH_DOMAINS = ["upstash.io", "upstash.cloud", "upstash.com"]
 
 def init_qstash() -> QStash:
     kwargs: dict[str, Any] = {
-        "token": QSTASH_TOKEN,
+        "token": qstash_settings.QSTASH_TOKEN,
     }
     if QSTASH_URL is not None:
         domain = urlparse(QSTASH_URL).netloc
