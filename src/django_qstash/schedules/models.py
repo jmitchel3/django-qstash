@@ -10,6 +10,7 @@ from django.utils import timezone
 
 from django_qstash.discovery.models import TaskField
 from django_qstash.schedules.validators import validate_cron_expression
+from django_qstash.schedules.validators import validate_delay_string
 from django_qstash.schedules.validators import validate_duration_string
 
 DJANGO_QSTASH_DOMAIN = getattr(settings, "DJANGO_QSTASH_DOMAIN", None)
@@ -97,6 +98,79 @@ class TaskSchedule(models.Model):
         validators=[validate_duration_string],
         help_text="Duration string for task timeout (e.g., '1s', '5m', '2h'). "
         "See Max HTTP Connection Timeout on QStash pricing page for allowed values for your Upstash account.",
+    )
+    retry_delay = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        verbose_name="Retry Delay",
+        help_text="Optional QStash retry-delay expression, such as '1000' or 'pow(2, retried) * 1000'.",
+    )
+    delay = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        verbose_name="Delivery Delay",
+        validators=[validate_delay_string],
+        help_text="Optional delay applied after each cron trigger before delivery (e.g., '30s' or '1d10m').",
+    )
+    queue = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        verbose_name="Queue",
+        help_text="Optional QStash queue name for FIFO delivery of scheduled messages.",
+    )
+    headers = models.JSONField(
+        blank=True,
+        default=dict,
+        verbose_name="Headers",
+        help_text="Headers forwarded to the task webhook by QStash.",
+    )
+    callback = models.URLField(
+        max_length=2048,
+        blank=True,
+        default="",
+        verbose_name="Callback URL",
+        help_text="Optional callback URL QStash calls after each delivery attempt.",
+    )
+    callback_headers = models.JSONField(
+        blank=True,
+        default=dict,
+        verbose_name="Callback Headers",
+        help_text="Headers forwarded to the callback URL.",
+    )
+    failure_callback = models.URLField(
+        max_length=2048,
+        blank=True,
+        default="",
+        verbose_name="Failure Callback URL",
+        help_text="Optional callback URL QStash calls after all retries are exhausted.",
+    )
+    failure_callback_headers = models.JSONField(
+        blank=True,
+        default=dict,
+        verbose_name="Failure Callback Headers",
+        help_text="Headers forwarded to the failure callback URL.",
+    )
+    flow_control = models.JSONField(
+        blank=True,
+        default=dict,
+        verbose_name="Flow Control",
+        help_text="Optional QStash flow control settings, such as {'key': 'emails', 'rate': 10, 'period': '1m'}.",
+    )
+    label = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        verbose_name="Label",
+        help_text="Optional QStash label for log and DLQ filtering.",
+    )
+    redact = models.JSONField(
+        blank=True,
+        default=dict,
+        verbose_name="Redaction",
+        help_text="Optional QStash log redaction settings, such as {'body': True} or {'header': ['Authorization']}.",
     )
     updated_at = models.DateTimeField(auto_now=True)
     is_active = models.BooleanField(default=True)

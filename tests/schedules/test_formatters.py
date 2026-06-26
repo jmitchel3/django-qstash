@@ -21,6 +21,10 @@ class TestFormatters:
         task_schedule.name = "Test Task"
         task_schedule.retries = 3
         task_schedule.timeout = "30s"
+        task_schedule.retry_delay = "1000 * (1 + retried)"
+        task_schedule.delay = "10m"
+        task_schedule.queue = "emails"
+        task_schedule.label = "scheduled,email"
         task_schedule.save()
 
         # Get payload
@@ -34,7 +38,11 @@ class TestFormatters:
         assert payload["task_name"] == "Test Task"
         assert payload["options"] == {
             "max_retries": 3,
+            "retry_delay": "1000 * (1 + retried)",
             "timeout": "30s",
+            "delay": "10m",
+            "queue": "emails",
+            "label": "scheduled,email",
         }
 
     def test_format_task_schedule_for_qstash(self, task_schedule: TaskSchedule):
@@ -47,6 +55,17 @@ class TestFormatters:
         task_schedule.cron = "*/10 * * * *"
         task_schedule.retries = 3
         task_schedule.timeout = "30s"
+        task_schedule.retry_delay = "1000"
+        task_schedule.delay = "5m"
+        task_schedule.queue = "emails"
+        task_schedule.headers = {"X-Trace-Id": "abc"}
+        task_schedule.callback = "https://example.com/qstash/callback/"
+        task_schedule.callback_headers = {"X-Callback": "yes"}
+        task_schedule.failure_callback = "https://example.com/qstash/failure/"
+        task_schedule.failure_callback_headers = {"X-Failure": "yes"}
+        task_schedule.flow_control = {"key": "emails", "parallelism": 1}
+        task_schedule.label = "scheduled,email"
+        task_schedule.redact = {"body": True}
         task_schedule.schedule_id = "test-schedule-id"
         task_schedule.save()
 
@@ -59,6 +78,17 @@ class TestFormatters:
         assert data["cron"] == "*/10 * * * *"
         assert data["retries"] == 3
         assert data["timeout"] == "30s"
+        assert data["retry_delay"] == "1000"
+        assert data["delay"] == "5m"
+        assert data["queue"] == "emails"
+        assert data["headers"] == {"X-Trace-Id": "abc"}
+        assert data["callback"] == "https://example.com/qstash/callback/"
+        assert data["callback_headers"] == {"X-Callback": "yes"}
+        assert data["failure_callback"] == "https://example.com/qstash/failure/"
+        assert data["failure_callback_headers"] == {"X-Failure": "yes"}
+        assert data["flow_control"] == {"key": "emails", "parallelism": 1}
+        assert data["label"] == "scheduled,email"
+        assert data["redact"] == {"body": True}
         assert data["schedule_id"] == "test-schedule-id"
 
         # Verify payload in body
@@ -80,3 +110,23 @@ class TestFormatters:
 
         # Verify schedule_id is not in data
         assert "schedule_id" not in data
+
+    def test_format_task_schedule_omits_empty_qstash_options(
+        self, task_schedule: TaskSchedule
+    ):
+        data = format_task_schedule_for_qstash(task_schedule)
+
+        for field in [
+            "retry_delay",
+            "delay",
+            "queue",
+            "headers",
+            "callback",
+            "callback_headers",
+            "failure_callback",
+            "failure_callback_headers",
+            "flow_control",
+            "label",
+            "redact",
+        ]:
+            assert field not in data

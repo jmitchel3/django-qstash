@@ -354,6 +354,17 @@ Represents a scheduled task using QStash Schedules. Available when `django_qstas
 | `cron` | `CharField(255)` | Cron expression (e.g., `"0 0 * * *"`) |
 | `retries` | `IntegerField` | Number of retries (default: 3, max: 5) |
 | `timeout` | `CharField(10)` | Timeout duration string (e.g., `"60s"`) |
+| `retry_delay` | `CharField(255)` | Optional QStash retry-delay expression |
+| `delay` | `CharField(32)` | Optional delivery delay after each cron trigger |
+| `queue` | `CharField(255)` | Optional QStash queue for FIFO scheduled delivery |
+| `headers` | `JSONField` | Headers forwarded to the task webhook |
+| `callback` | `URLField(2048)` | Optional callback URL called after each delivery attempt |
+| `callback_headers` | `JSONField` | Headers forwarded to the callback URL |
+| `failure_callback` | `URLField(2048)` | Optional callback URL called after retries are exhausted |
+| `failure_callback_headers` | `JSONField` | Headers forwarded to the failure callback URL |
+| `flow_control` | `JSONField` | Optional QStash flow control settings |
+| `label` | `CharField(255)` | Optional QStash label for logs and DLQ filtering |
+| `redact` | `JSONField` | Optional QStash log redaction settings |
 | `updated_at` | `DateTimeField` | Last update timestamp |
 | `is_active` | `BooleanField` | Whether the schedule is active |
 | `active_at` | `DateTimeField` | When the schedule was activated |
@@ -377,6 +388,12 @@ The `cron` field uses standard cron syntax:
 ```
 
 Use [crontab.guru](https://crontab.guru/) to build cron expressions.
+
+QStash timezone prefixes are supported:
+
+```text
+CRON_TZ=America/New_York 0 4 * * *
+```
 
 #### Example: Creating a Schedule
 
@@ -406,6 +423,23 @@ TaskSchedule.objects.create(
     cron="0 9 * * 1",
     retries=5,
     timeout="300s",
+)
+
+# Run every morning in a specific timezone with QStash delivery controls
+TaskSchedule.objects.create(
+    name="Daily Email Digest",
+    task="myapp.tasks.send_daily_digest",
+    cron="CRON_TZ=America/New_York 0 7 * * *",
+    retries=5,
+    retry_delay="1000 * (1 + retried)",
+    timeout="120s",
+    delay="30s",
+    queue="emails",
+    headers={"X-Trace-Source": "daily-digest"},
+    failure_callback="https://example.com/qstash/failure/",
+    flow_control={"key": "daily-digest", "rate": 10, "period": "1m"},
+    label="scheduled,email",
+    redact={"body": True},
 )
 ```
 
@@ -567,6 +601,51 @@ Schedule ID: sched_def456
   Destination: https://example.com/qstash/webhook/
   Retries: 3
   Status: Paused
+```
+
+---
+
+### `qstash_dlq`
+
+List, inspect, and delete QStash dead letter queue messages.
+
+```bash
+python manage.py qstash_dlq --list
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--list` | List DLQ messages |
+| `--get <dlq_id>` | Fetch one DLQ message |
+| `--delete <dlq_id>` | Delete one DLQ message |
+| `--delete-many <dlq_id> [<dlq_id> ...]` | Delete multiple DLQ messages |
+| `--count <n>` | Maximum number of DLQ messages to list |
+| `--cursor <cursor>` | Pagination cursor returned by a previous list call |
+| `--message-id <message_id>` | Filter by QStash message ID |
+| `--url <url>` | Filter by destination URL |
+| `--url-group <name>` | Filter by URL group |
+| `--queue <name>` | Filter by queue name |
+| `--schedule-id <schedule_id>` | Filter by schedule ID |
+| `--response-status <status>` | Filter by final HTTP response status |
+| `--label <label>` | Filter by QStash label |
+
+**Examples:**
+
+```bash
+# List recent DLQ messages
+python manage.py qstash_dlq --list --count 20
+
+# Filter failed scheduled email deliveries
+python manage.py qstash_dlq --list --queue emails --label scheduled,email
+
+# Inspect one failed delivery
+python manage.py qstash_dlq --get dlq_abc123
+
+# Delete DLQ entries after triage
+python manage.py qstash_dlq --delete dlq_abc123
+python manage.py qstash_dlq --delete-many dlq_abc123 dlq_def456
 ```
 
 ---

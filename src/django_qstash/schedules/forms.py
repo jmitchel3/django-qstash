@@ -20,7 +20,18 @@ class TaskScheduleForm(forms.ModelForm):
             "schedule_id",
             "cron",
             "retries",
+            "retry_delay",
             "timeout",
+            "delay",
+            "queue",
+            "headers",
+            "callback",
+            "callback_headers",
+            "failure_callback",
+            "failure_callback_headers",
+            "flow_control",
+            "label",
+            "redact",
         ]
 
     def clean(self):

@@ -9,6 +9,29 @@ from django_qstash.schedules.models import TaskSchedule
 JSON_CONTENT_TYPE = "application/json"
 
 
+def _compact_qstash_options(options: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in options.items()
+        if value is not None
+        and value != ""
+        and not (isinstance(value, (dict, list, tuple)) and not value)
+    }
+
+
+def _task_options(instance: TaskSchedule) -> dict[str, Any]:
+    return _compact_qstash_options(
+        {
+            "max_retries": instance.retries,
+            "retry_delay": instance.retry_delay,
+            "timeout": instance.timeout,
+            "delay": instance.delay,
+            "queue": instance.queue,
+            "label": instance.label,
+        }
+    )
+
+
 def prepare_qstash_payload(instance: TaskSchedule) -> dict[str, Any]:
     """Prepare the task payload for QStash"""
     return {
@@ -17,10 +40,7 @@ def prepare_qstash_payload(instance: TaskSchedule) -> dict[str, Any]:
         "args": instance.args,
         "kwargs": instance.kwargs,
         "task_name": instance.name,
-        "options": {
-            "max_retries": instance.retries,
-            "timeout": instance.timeout,
-        },
+        "options": _task_options(instance),
     }
 
 
@@ -35,6 +55,23 @@ def format_task_schedule_for_qstash(instance: TaskSchedule) -> dict[str, Any]:
         "retries": instance.retries,
         "timeout": instance.timeout,
     }
+    data.update(
+        _compact_qstash_options(
+            {
+                "headers": instance.headers,
+                "callback_headers": instance.callback_headers,
+                "failure_callback_headers": instance.failure_callback_headers,
+                "retry_delay": instance.retry_delay,
+                "callback": instance.callback,
+                "failure_callback": instance.failure_callback,
+                "delay": instance.delay,
+                "queue": instance.queue,
+                "flow_control": instance.flow_control,
+                "label": instance.label,
+                "redact": instance.redact,
+            }
+        )
+    )
     if instance.schedule_id:
         data["schedule_id"] = instance.schedule_id
     return data

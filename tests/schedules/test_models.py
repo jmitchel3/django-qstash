@@ -19,6 +19,17 @@ def test_task_schedule_creation(task_schedule):
     assert task_schedule.kwargs == {}
     assert task_schedule.retries == 3
     assert task_schedule.timeout == "30s"
+    assert task_schedule.retry_delay == ""
+    assert task_schedule.delay == ""
+    assert task_schedule.queue == ""
+    assert task_schedule.headers == {}
+    assert task_schedule.callback == ""
+    assert task_schedule.callback_headers == {}
+    assert task_schedule.failure_callback == ""
+    assert task_schedule.failure_callback_headers == {}
+    assert task_schedule.flow_control == {}
+    assert task_schedule.label == ""
+    assert task_schedule.redact == {}
     assert task_schedule.is_active is True
     assert task_schedule.is_paused is False
     assert task_schedule.is_resumed is True
@@ -275,3 +286,35 @@ def test_json_field_handling(db):
     )
     assert empty_schedule.args == []
     assert empty_schedule.kwargs == {}
+
+
+def test_task_schedule_qstash_delivery_options(db):
+    schedule = TaskSchedule.objects.create(
+        name="Delivery Options",
+        task="myapp.tasks.test_task",
+        retry_delay="1000 * (1 + retried)",
+        delay="1d10m",
+        queue="emails",
+        headers={"X-Trace-Id": "abc"},
+        callback="https://example.com/qstash/callback/",
+        callback_headers={"X-Callback": "yes"},
+        failure_callback="https://example.com/qstash/failure/",
+        failure_callback_headers={"X-Failure": "yes"},
+        flow_control={"key": "emails", "rate": 10, "period": "1m"},
+        label="scheduled,email",
+        redact={"body": True, "header": ["Authorization"]},
+    )
+
+    schedule.refresh_from_db()
+
+    assert schedule.retry_delay == "1000 * (1 + retried)"
+    assert schedule.delay == "1d10m"
+    assert schedule.queue == "emails"
+    assert schedule.headers == {"X-Trace-Id": "abc"}
+    assert schedule.callback == "https://example.com/qstash/callback/"
+    assert schedule.callback_headers == {"X-Callback": "yes"}
+    assert schedule.failure_callback == "https://example.com/qstash/failure/"
+    assert schedule.failure_callback_headers == {"X-Failure": "yes"}
+    assert schedule.flow_control == {"key": "emails", "rate": 10, "period": "1m"}
+    assert schedule.label == "scheduled,email"
+    assert schedule.redact == {"body": True, "header": ["Authorization"]}

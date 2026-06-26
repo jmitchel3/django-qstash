@@ -14,6 +14,10 @@ from django_qstash.schedules.services import sync_task_schedule_instance_to_qsta
 @pytest.mark.django_db
 def test_sync_task_schedule_instance_to_qstash(task_schedule):
     """Test syncing a task schedule to QStash"""
+    task_schedule.queue = "emails"
+    task_schedule.retry_delay = "1000"
+    task_schedule.save()
+
     with patch(
         "django_qstash.schedules.services.qstash_client.schedule.create"
     ) as mock_create:
@@ -23,6 +27,8 @@ def test_sync_task_schedule_instance_to_qstash(task_schedule):
         result = sync_task_schedule_instance_to_qstash(task_schedule)
 
         mock_create.assert_called_once()  # Verify the mock was called
+        assert mock_create.call_args.kwargs["queue"] == "emails"
+        assert mock_create.call_args.kwargs["retry_delay"] == "1000"
         assert result == task_schedule
 
 

@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-06-25
+
+### Added
+- `TaskSchedule` now supports QStash delivery controls for `retry_delay`, `delay`, `queue`, forwarded headers, callbacks, failure callbacks, flow control, labels, and redaction.
+- Schedule formatting forwards the new delivery options to `qstash.schedule.create` when set.
+- Cron validation now accepts QStash `CRON_TZ=Area/Location` timezone prefixes.
+- Added `qstash_dlq` for listing, filtering, inspecting, and deleting QStash dead letter queue entries.
+
 ## [0.3.1] - 2026-06-25
 
 ### Fixed

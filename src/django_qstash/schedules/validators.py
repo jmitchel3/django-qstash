@@ -33,12 +33,40 @@ def validate_duration_string(value):
         )
 
 
+def validate_delay_string(value):
+    if not re.match(r"^(\d+[smhd])+$", value):
+        raise InvalidDurationStringValidationError(
+            'Invalid delay format. Must be one or more number/unit pairs using s, m, h, or d. E.g., "60s", "5m", "1d10m"'
+        )
+
+    total_days = 0.0
+    for number, unit in re.findall(r"(\d+)([smhd])", value):
+        total_days += {
+            "s": int(number) / (24 * 60 * 60),
+            "m": int(number) / (24 * 60),
+            "h": int(number) / 24,
+            "d": int(number),
+        }[unit]
+
+    if total_days > 7:
+        raise InvalidDurationStringValidationError(
+            "Delay too long. Maximum allowed: 7 days (equivalent to: 604800s, 10080m, 168h, 7d)"
+        )
+
+
 def validate_cron_expression(value: str) -> None:
     """Validates a standard cron expression with 5 fields (minute, hour, day of month, month, day of week)."""
     parts = value.split()
+    if parts and parts[0].startswith("CRON_TZ="):
+        if parts[0] == "CRON_TZ=":
+            raise InvalidCronStringValidationError(
+                "Invalid cron timezone. CRON_TZ must include an IANA timezone name."
+            )
+        parts = parts[1:]
+
     if len(parts) != 5:
         raise InvalidCronStringValidationError(
-            'Invalid cron format. Must contain 5 fields: "minute hour day_of_month month day_of_week"'
+            'Invalid cron format. Must contain 5 fields: "minute hour day_of_month month day_of_week", optionally prefixed with "CRON_TZ=Area/Location"'
         )
 
     field_descriptions = {

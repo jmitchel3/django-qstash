@@ -328,6 +328,12 @@ _Requires `django_qstash.schedules` installed._
 - `python manage.py task_schedules --list` see all schedules relate to the `DJANGO_QSTASH_DOMAIN`
 - `python manage.py task_schedules --sync` sync schedules based on the `DJANGO_QSTASH_DOMAIN` to store in the Django Admin.
 
+QStash dead letter queue:
+- `python manage.py qstash_dlq --list` list exhausted QStash messages
+- `python manage.py qstash_dlq --get <dlq_id>` inspect one DLQ message
+- `python manage.py qstash_dlq --delete <dlq_id>` delete one DLQ message
+- `python manage.py qstash_dlq --list --queue emails --label scheduled,email` filter DLQ messages
+
 ## Development
 
 During development, you have two options:
@@ -480,7 +486,26 @@ TaskSchedule.objects.create(
 - `django_qstash.results.tasks.clear_stale_results_task` is a built-in task that `django_qstash.results` provides
 - Use the `task` field for the dotted Python path of the decorated task. You can also pass an imported `@shared_task`/`@stashed_task` object to `task`. `task_name` is managed by django-qstash and mirrors the selected task path.
 - `args` and `kwargs` are the arguments to pass to the task
-- `cron` is the cron schedule to run the task. Use [contrab.guru](https://crontab.guru/) for writing the cron format.
+- `cron` is the cron schedule to run the task. Use [crontab.guru](https://crontab.guru/) for writing the cron format. QStash timezone prefixes are supported, e.g. `CRON_TZ=America/New_York 0 4 * * *`.
+
+Scheduled tasks can use QStash delivery controls for retries, callbacks, queues, flow control, labels, headers, and redaction:
+
+```python
+TaskSchedule.objects.create(
+    name="Daily Email Digest",
+    task="example_app.tasks.send_daily_digest",
+    cron="CRON_TZ=America/New_York 0 7 * * *",
+    retries=5,
+    retry_delay="1000 * (1 + retried)",
+    timeout="120s",
+    queue="emails",
+    label="scheduled,email",
+    headers={"X-Trace-Source": "daily-digest"},
+    failure_callback="https://example.com/qstash/failure/",
+    flow_control={"key": "daily-digest", "rate": 10, "period": "1m"},
+    redact={"body": True},
+)
+```
 
 
 ## Store Task Results (Optional)

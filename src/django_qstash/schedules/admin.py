@@ -14,6 +14,8 @@ class TaskScheduleAdmin(admin.ModelAdmin):
         "display_task_name",
         "display_task_path",
         "cron",
+        "queue",
+        "label",
         "is_active",
     ]
     readonly_fields = [
@@ -48,7 +50,35 @@ class TaskScheduleAdmin(admin.ModelAdmin):
         (
             "Schedule",
             {
-                "fields": ["cron", "retries", "timeout"],
+                "fields": [
+                    "cron",
+                    "retries",
+                    "retry_delay",
+                    "timeout",
+                    "delay",
+                    "queue",
+                    "label",
+                ],
+            },
+        ),
+        (
+            "Headers and Callbacks",
+            {
+                "fields": [
+                    "headers",
+                    "callback",
+                    "callback_headers",
+                    "failure_callback",
+                    "failure_callback_headers",
+                ],
+                "classes": ["collapse"],
+            },
+        ),
+        (
+            "Flow Control and Redaction",
+            {
+                "fields": ["flow_control", "redact"],
+                "classes": ["collapse"],
             },
         ),
         (
