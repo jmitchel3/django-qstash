@@ -9,7 +9,7 @@ from django_qstash.schedules.exceptions import InvalidCronStringValidationError
 from django_qstash.schedules.exceptions import InvalidDurationStringValidationError
 
 
-def validate_duration_string(value):
+def validate_duration_string(value: str) -> None:
     if not re.match(r"^\d+[smhd]$", value):
         raise InvalidDurationStringValidationError(
             'Invalid duration format. Must be a number followed by s (seconds), m (minutes), h (hours), or d (days). E.g., "60s", "5m", "2h", "7d"'
@@ -33,7 +33,7 @@ def validate_duration_string(value):
         )
 
 
-def validate_delay_string(value):
+def validate_delay_string(value: str) -> None:
     if not re.match(r"^(\d+[smhd])+$", value):
         raise InvalidDurationStringValidationError(
             'Invalid delay format. Must be one or more number/unit pairs using s, m, h, or d. E.g., "60s", "5m", "1d10m"'

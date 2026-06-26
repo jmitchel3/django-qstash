@@ -5,6 +5,9 @@ from unittest.mock import patch
 
 from django.core.management import call_command
 
+from django_qstash.management.commands.qstash_dlq import _display
+from django_qstash.management.commands.qstash_dlq import _truncate
+
 
 def _dlq_message(**overrides):
     message = Mock()
@@ -113,6 +116,20 @@ def test_qstash_dlq_no_options(capsys):
 
     captured = capsys.readouterr()
     assert "Please specify --list, --get, --delete, or --delete-many" in captured.out
+
+
+def test_display_empty_values_render_dash():
+    """_display renders a dash for None and empty-string values."""
+    assert _display(None) == "-"
+    assert _display("") == "-"
+
+
+def test_truncate_long_value():
+    """_truncate shortens values longer than the max length with an ellipsis."""
+    text = "x" * 300
+    truncated = _truncate(text, max_length=10)
+    assert truncated == "xxxxxxx..."
+    assert len(truncated) == 10
 
 
 @patch("django_qstash.management.commands.qstash_dlq.qstash_client")

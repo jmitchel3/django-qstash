@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import Any
+from typing import cast
 
 from django.apps import apps
 from django.core.management.base import BaseCommand
+from django.core.management.base import CommandParser
 from django.db import models
 
 from django_qstash.callbacks import get_callback_url
@@ -18,7 +21,7 @@ class Command(BaseCommand):
 
     help = "List and sync schedules from QStash"
 
-    def add_arguments(self, parser) -> None:
+    def add_arguments(self, parser: CommandParser) -> None:
         parser.add_argument(
             "--list",
             action="store_true",
@@ -35,7 +38,7 @@ class Command(BaseCommand):
             help="Do not ask for confirmation",
         )
 
-    def get_task_schedule_model(self) -> models.Model | None:
+    def get_task_schedule_model(self) -> type[models.Model] | None:
         """Get the TaskSchedule model if available."""
         try:
             return apps.get_model("django_qstash_schedules", "TaskSchedule")
@@ -46,10 +49,13 @@ class Command(BaseCommand):
                     "Add `django_qstash.schedules` to INSTALLED_APPS and run migrations."
                 )
             )
+            return None
 
-    def sync_schedules(self, schedules: list) -> None:
+    def sync_schedules(self, schedules: list[Any]) -> None:
         """Sync remote schedules to local database."""
         TaskSchedule = self.get_task_schedule_model()
+        if TaskSchedule is None:
+            return
 
         for schedule in schedules:
             try:
@@ -57,7 +63,7 @@ class Command(BaseCommand):
                 task_name = body.get("task_name", "Unnamed Task")
                 function = f"{body['module']}.{body['function']}"
 
-                obj, created = TaskSchedule.objects.update_or_create(
+                obj, created = cast(Any, TaskSchedule).objects.update_or_create(
                     schedule_id=schedule.schedule_id,
                     defaults={
                         "name": task_name,
@@ -74,7 +80,7 @@ class Command(BaseCommand):
             except Exception:
                 logger.exception("Failed to sync schedule %s", schedule.schedule_id)
 
-    def handle(self, *args, **options) -> None:
+    def handle(self, *args: Any, **options: Any) -> None:
         auto_confirm = options.get("no_input")
         if not (options.get("sync") or options.get("list")):
             self.stdout.write(
@@ -93,7 +99,7 @@ class Command(BaseCommand):
             )
 
             for schedule in schedules:
-                body = json.loads(schedule.body)
+                body = json.loads(cast(str, schedule.body))
                 task_name = body.get("task_name", "Unnamed Task")
                 function = f"{body['module']}.{body['function']}"
 

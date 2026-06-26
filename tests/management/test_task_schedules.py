@@ -203,6 +203,19 @@ class TestTaskSchedulesCommand:
             in captured.out
         )
 
+    def test_sync_schedules_returns_when_model_missing(self):
+        """sync_schedules should bail out early when TaskSchedule is unavailable"""
+        from django_qstash.management.commands.task_schedules import Command
+
+        command = Command()
+        schedule = Mock()
+        with patch.object(command, "get_task_schedule_model", return_value=None):
+            result = command.sync_schedules([schedule])
+
+        assert result is None
+        # No schedule should be inspected once the model is missing.
+        schedule.body.assert_not_called()
+
     @pytest.fixture
     def command_output(self):
         stdout = StringIO()

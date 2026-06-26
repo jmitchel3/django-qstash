@@ -31,5 +31,5 @@ class TaskResult(models.Model):
         app_label = "django_qstash_results"
         ordering = ["-date_done"]
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f"{self.task_name} ({self.task_id})"

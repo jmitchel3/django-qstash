@@ -210,14 +210,15 @@ class QStashTask(Generic[R]):
         )
         queue = message_options.pop("queue", None)
 
+        response: Any
         if queue is None:
-            method = qstash_client.message.publish_json
-            send_options = _supported_kwargs(method, message_options)
-            response = method(url=url, body=payload, **send_options)
+            publish = qstash_client.message.publish_json
+            send_options = _supported_kwargs(publish, message_options)
+            response = publish(url=url, body=payload, **send_options)
         else:
-            method = qstash_client.message.enqueue_json
-            send_options = _supported_kwargs(method, message_options)
-            response = method(queue=queue, url=url, body=payload, **send_options)
+            enqueue = qstash_client.message.enqueue_json
+            send_options = _supported_kwargs(enqueue, message_options)
+            response = enqueue(queue=queue, url=url, body=payload, **send_options)
 
         # Return an AsyncResult-like object for Celery compatibility
         return AsyncResult(response.message_id)

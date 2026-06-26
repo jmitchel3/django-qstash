@@ -183,7 +183,7 @@ class TaskSchedule(models.Model):
     def __str__(self) -> str:
         return self.name or self.task_name or self.task
 
-    def save(self, *args, **kwargs):
+    def save(self, *args: Any, **kwargs: Any) -> None:
         current_task_name = _normalize_task_reference(self.task)
         if not current_task_name:
             fallback_task_name = _normalize_task_reference(self.task_name)

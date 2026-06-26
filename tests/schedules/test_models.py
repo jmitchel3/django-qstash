@@ -7,7 +7,35 @@ from django.core.exceptions import ValidationError
 from django.utils import timezone
 
 from django_qstash.schedules.models import TaskSchedule
+from django_qstash.schedules.models import _normalize_task_reference
 from tests.discovery.tasks import debug_task
+
+
+def plain_function():
+    return None
+
+
+def test_normalize_task_reference_plain_function():
+    """A plain function is normalized to its module and qualified name."""
+    result = _normalize_task_reference(plain_function)
+    assert result == "tests.schedules.test_models.plain_function"
+
+
+def test_normalize_task_reference_falls_back_to_str():
+    """A value without func/module/name falls back to str()."""
+    assert _normalize_task_reference(123) == "123"
+
+
+def test_normalize_task_reference_empty():
+    """A falsy value returns an empty string."""
+    assert _normalize_task_reference(None) == ""
+
+
+def test_save_with_empty_task_and_task_name(db):
+    """Saving with no task and no task_name leaves both empty."""
+    schedule = TaskSchedule.objects.create(name="Empty Task")
+    assert schedule.task == ""
+    assert schedule.task_name == ""
 
 
 def test_task_schedule_creation(task_schedule):

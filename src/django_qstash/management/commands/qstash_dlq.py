@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from typing import Any
+from typing import cast
 
 from django.core.management.base import BaseCommand
+from django.core.management.base import CommandParser
+from qstash.dlq import DlqFilter
 
 from django_qstash.client import qstash_client
 
@@ -43,7 +46,7 @@ class Command(BaseCommand):
 
     help = "List, inspect, and delete QStash DLQ messages"
 
-    def add_arguments(self, parser) -> None:
+    def add_arguments(self, parser: CommandParser) -> None:
         parser.add_argument("--list", action="store_true", help="List DLQ messages")
         parser.add_argument("--get", help="Fetch one DLQ message by DLQ ID")
         parser.add_argument("--delete", help="Delete one DLQ message by DLQ ID")
@@ -82,7 +85,7 @@ class Command(BaseCommand):
         response = qstash_client.dlq.list(
             cursor=options.get("cursor"),
             count=options.get("count"),
-            filter=_compact_filter(options),
+            filter=cast("DlqFilter | None", _compact_filter(options)),
         )
         self.stdout.write(
             self.style.SUCCESS(f"Found {len(response.messages)} DLQ messages")
@@ -92,7 +95,7 @@ class Command(BaseCommand):
         if response.cursor:
             self.stdout.write(f"\nNext cursor: {response.cursor}")
 
-    def handle(self, *args, **options) -> None:
+    def handle(self, *args: Any, **options: Any) -> None:
         try:
             if options.get("list"):
                 self._list_messages(options)

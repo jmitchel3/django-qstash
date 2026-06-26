@@ -6,6 +6,7 @@ import logging
 import time
 from dataclasses import dataclass
 from typing import Any
+from typing import cast
 from urllib.parse import urlparse
 from urllib.parse import urlunparse
 
@@ -44,13 +45,13 @@ def _emit_signal(signal: Any, **kwargs: Any) -> None:
 class TaskPayload:
     function: str
     module: str
-    args: list
-    kwargs: dict
+    args: list[Any]
+    kwargs: dict[str, Any]
     task_name: str
     function_path: str
 
     @classmethod
-    def from_dict(cls, data: dict) -> TaskPayload:
+    def from_dict(cls, data: dict[str, Any]) -> TaskPayload:
         """Create TaskPayload from dictionary."""
         is_valid, error = utils.validate_task_payload(data)
         if not is_valid:
@@ -68,7 +69,7 @@ class TaskPayload:
 
 
 class QStashWebhook:
-    def __init__(self):
+    def __init__(self) -> None:
         self.receiver = Receiver(
             current_signing_key=settings.QSTASH_CURRENT_SIGNING_KEY,
             next_signing_key=settings.QSTASH_NEXT_SIGNING_KEY,
@@ -101,7 +102,7 @@ class QStashWebhook:
 
         return url
 
-    def verify_signature(self, body: str, signature: str, url: str) -> None:
+    def verify_signature(self, body: str, signature: str | None, url: str) -> None:
         """Verify QStash signature."""
         if not signature:
             raise SignatureError("Missing Upstash-Signature header")
@@ -211,14 +212,40 @@ class QStashWebhook:
 
             raise TaskError(f"Task execution failed: {e}")
 
+    def _store_result(
+        self,
+        *,
+        payload: TaskPayload,
+        task_id: str | None,
+        status: str,
+        result: Any = None,
+        traceback: str | None = None,
+    ) -> None:
+        """
+        Persist a task result, deriving the task metadata from the payload.
+
+        Centralizes the repeated store_task_result calls across the success,
+        TaskError, and generic Exception paths in handle_request.
+        """
+        store_task_result(
+            task_id=task_id,
+            task_name=payload.task_name,
+            status=status,
+            result=result,
+            traceback=traceback,
+            args=payload.args,
+            kwargs=payload.kwargs,
+            function_path=payload.function_path,
+        )
+
     def _get_client_ip(self, request: HttpRequest) -> str:
         """Extract client IP from request headers."""
         x_forwarded_for = request.headers.get("x-forwarded-for")
         if x_forwarded_for:
             return x_forwarded_for.split(",")[0].strip()
-        return request.META.get("REMOTE_ADDR", "unknown")
+        return str(request.META.get("REMOTE_ADDR", "unknown"))
 
-    def handle_request(self, request: HttpRequest) -> tuple[dict, int]:
+    def handle_request(self, request: HttpRequest) -> tuple[dict[str, Any], int]:
         """Process webhook request and return response data and status code."""
         from django_qstash.signals import webhook_received as webhook_received_signal
 
@@ -269,14 +296,11 @@ class QStashWebhook:
             )
 
             result = self.execute_task(payload)
-            store_task_result(
+            self._store_result(
+                payload=payload,
                 task_id=task_id,
-                task_name=payload.task_name,
                 status=TaskStatus.SUCCESS,
                 result=result,
-                args=payload.args,
-                kwargs=payload.kwargs,
-                function_path=payload.function_path,
             )
 
             return {
@@ -296,33 +320,30 @@ class QStashWebhook:
 
         except TaskError as e:
             logger.exception("Task execution error: %s", str(e))
-            store_task_result(
+            # TaskError is only raised from execute_task, which runs after the
+            # payload has been parsed, so payload is guaranteed non-None here.
+            parsed_payload = cast(TaskPayload, payload)
+            self._store_result(
+                payload=parsed_payload,
                 task_id=task_id,
-                task_name=payload.task_name,
                 status=TaskStatus.EXECUTION_ERROR,
                 traceback=str(e),
-                args=payload.args,
-                kwargs=payload.kwargs,
-                function_path=payload.function_path,
             )
             return {
                 "status": "error",
                 "error_type": e.__class__.__name__,
                 "error": str(e),
-                "task_name": payload.task_name,
+                "task_name": parsed_payload.task_name,
             }, 422
 
         except Exception as e:
             logger.exception("Unexpected error in webhook handler: %s", str(e))
             if payload:  # Store unexpected errors only if payload was parsed
-                store_task_result(
+                self._store_result(
+                    payload=payload,
                     task_id=task_id,
-                    task_name=payload.task_name,
                     status=TaskStatus.INTERNAL_ERROR,
                     traceback=str(e),
-                    args=payload.args,
-                    kwargs=payload.kwargs,
-                    function_path=payload.function_path,
                 )
             return {
                 "status": "error",

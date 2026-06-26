@@ -88,15 +88,15 @@
 
         <div class="task-info">
             <h2 class="task-title">Task Information</h2>
-            
+
             <div class="task-label">Welcome Email Task ID:</div>
             <div class="task-id">{{ welcome_task_id }}</div>
-            
+
             <div class="task-label">Reminder Email Task ID:</div>
             <div class="task-id">{{ reminder_task_id }}</div>
-            
+
             <p class="info-text">✉️ A welcome email has been sent immediately, and a reminder will be sent in 24 hours.</p>
-            
+
             <a href="{% url 'task_dashboard' %}" class="view-dashboard">View Task Dashboard →</a>
         </div>
     </div>

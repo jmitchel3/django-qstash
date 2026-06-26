@@ -24,6 +24,7 @@ jobs:
   tests:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
 
     strategy:
       matrix:
@@ -50,9 +51,11 @@ jobs:
 
     - name: Install dependencies
       run: uv pip install --system tox tox-uv
+      timeout-minutes: 5
 
     - name: Run tox targets for ${{ matrix.python-version }}
       run: tox run -f py$(echo ${{ matrix.python-version }} | tr -d .)
+      timeout-minutes: 15
 
     - name: Upload coverage data
       uses: actions/upload-artifact@v4
@@ -65,6 +68,7 @@ jobs:
   coverage:
     name: Coverage
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     needs: tests
     steps:
       - uses: actions/checkout@v4
@@ -78,6 +82,7 @@ jobs:
 
       - name: Install dependencies
         run: uv pip install --system coverage[toml]
+        timeout-minutes: 5
 
       - name: Download data
         uses: actions/download-artifact@v4
@@ -87,13 +92,13 @@ jobs:
           merge-multiple: true
 
       - name: Combine coverage and fail if it's <90%
+        timeout-minutes: 5
         run: |
           python -m coverage combine
           python -m coverage html --skip-covered --skip-empty
           python -m coverage report --fail-under=90
           echo "## Coverage summary" >> $GITHUB_STEP_SUMMARY
           python -m coverage report --format=markdown >> $GITHUB_STEP_SUMMARY
-        continue-on-error: true
 
       - name: Upload HTML report
         if: ${{ failure() }}
@@ -102,10 +107,29 @@ jobs:
           name: html-report
           path: htmlcov
 
+  typecheck:
+    name: Type check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Run mypy
+        run: uv run mypy src/
+        timeout-minutes: 5
+
   release:
-    needs: [coverage]
+    needs: [coverage, typecheck]
     if: success() && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     environment: release
 
     permissions:
@@ -119,5 +143,7 @@ jobs:
 
       - name: Build
         run: uv build
+        timeout-minutes: 5
 
       - uses: pypa/gh-action-pypi-publish@release/v1
+        timeout-minutes: 10

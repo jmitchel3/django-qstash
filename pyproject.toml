@@ -105,6 +105,7 @@ source = [
 show_missing = true
 
 [tool.mypy]
+plugins = [ "mypy_django_plugin.main" ]
 enable_error_code = [
   "ignore-without-code",
   "redundant-expr",
@@ -126,6 +127,9 @@ disallow_untyped_defs = false
 [[tool.mypy.overrides]]
 module = "qstash.*"
 ignore_missing_imports = true
+
+[tool.django-stubs]
+django_settings_module = "tests.settings"
 
 [tool.rstcheck]
 ignore_directives = [
