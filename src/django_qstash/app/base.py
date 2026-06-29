@@ -5,11 +5,11 @@ import inspect
 import time
 import traceback as traceback_module
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 from datetime import timezone
 from functools import partial
 from typing import Any
-from typing import Callable
 from typing import Generic
 from typing import TypeVar
 from typing import overload
