@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- `bind=True` support on `@shared_task`/`@stashed_task`. A bound task receives a `self` first argument whose `self.request` exposes `id`, `retries`, `correlation_id`, `task_name`, `args`, and `kwargs`. The retry count is read from QStash's `Upstash-Retried` header at the webhook; eager execution supplies a generated id and `retries=0`. Per-call request state lives on a fresh bound proxy, never on the shared task instance, so concurrent deliveries stay isolated.
+- Minimal sequential task chaining. `task.s(...)`/`task.si(...)` build a link signature and `apply_async(..., link=sig_or_list)` enqueues the linked task(s) after the task succeeds. Links are resolved through the task allowlist and enqueued by the webhook handler after success (and inline under eager mode); unresolved links are logged and skipped without failing the original task. Parallel `group`/`chord` canvas remains out of scope.
+- `DJANGO_QSTASH_DISCOVER_CLEAR_CACHE_ON_REQUEST` setting (defaults to `settings.DEBUG`) controls whether the task-discovery cache is cleared on every request. Production (`DEBUG=False`) no longer pays a per-request `dir()`-walk of every tasks module; development still picks up newly added tasks under autoreload.
+- `docs/celery-compatibility.md`: a compatibility matrix of what django-qstash supports, what differs from Celery, and what is not yet implemented.
+
+### Changed
+- Documented that webhook rate limiting belongs at the platform/edge layer (QStash signature verification provides authenticity); see the Security and Configuration guides.
+- Refreshed `prod-readiness.md` to v0.5.0 and reconciled its remaining-issues list against the current code (content-type validation, HTTPS parsing, mypy in CI, callback URL validation, and result-service typing are all resolved).
+
 ## [0.4.0] - 2026-06-25
 
 ### Added

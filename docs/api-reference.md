@@ -12,6 +12,8 @@ This document provides detailed documentation for all public APIs in django-qsta
   - [.apply_async()](#apply_async)
   - [.apply()](#apply)
   - [Direct Execution](#direct-execution)
+- [Bound Tasks (bind=True)](#bound-tasks-bindtrue)
+- [Task Chaining (link / .s())](#task-chaining-link--s)
 - [Testing Tasks (Eager Mode)](#testing-tasks-eager-mode)
 - [AsyncResult](#asyncresult)
   - [EagerResult](#eagerresult)
@@ -48,6 +50,7 @@ def stashed_task(
     func: Callable | None = None,
     name: str | None = None,
     deduplicated: bool = False,
+    bind: bool = False,
     **options: dict[str, Any],
 ) -> QStashTask: ...
 ```
@@ -59,6 +62,7 @@ def stashed_task(
 | `func` | `Callable` | `None` | The function to wrap (auto-populated when used as decorator) |
 | `name` | `str` | Function name | Custom name for the task (used in logging and admin) |
 | `deduplicated` | `bool` | `False` | Enable content-based deduplication in QStash |
+| `bind` | `bool` | `False` | Pass a bound `self` (with `self.request`) as the task's first argument (see [Bound Tasks](#bound-tasks-bindtrue)) |
 | `**options` | `dict` | `{}` | Additional options passed to QStash |
 
 #### Options
@@ -183,6 +187,8 @@ def apply_async(
     args: tuple | None = None,
     kwargs: dict | None = None,
     countdown: int | None = None,
+    eta: datetime | int | float | None = None,
+    link: Signature | list[Signature] | None = None,
     **options: dict[str, Any],
 ) -> AsyncResult: ...
 ```
@@ -194,6 +200,8 @@ def apply_async(
 | `args` | `tuple` | `None` | Positional arguments for the task |
 | `kwargs` | `dict` | `None` | Keyword arguments for the task |
 | `countdown` | `int` | `None` | Delay in seconds before executing |
+| `eta` | `datetime \| int \| float` | `None` | Absolute time to run (mapped to QStash `not_before`) |
+| `link` | `Signature \| list[Signature]` | `None` | Success-link(s) to run after this task succeeds (see [Task Chaining](#task-chaining-link--s)) |
 | `**options` | `dict` | `{}` | Additional options (merged with decorator options) |
 
 #### Returns
@@ -301,6 +309,97 @@ This is useful for:
 For testing, prefer [`.apply()`](#apply) or
 [eager mode](#testing-tasks-eager-mode), which capture the result and do not
 require QStash configuration.
+
+---
+
+## Bound Tasks (`bind=True`)
+
+`@stashed_task(bind=True)` (and `@shared_task(bind=True)`) is the Celery
+`bind=True` equivalent: the task body receives a bound `self` as its first
+positional argument, exposing the execution context via `self.request`.
+
+```python
+from django_qstash import shared_task
+
+
+@shared_task(bind=True)
+def process(self, order_id: int):
+    print(self.request.id)  # QStash message id (task id)
+    print(self.request.retries)  # delivery attempt count from QStash
+    # self-reschedule on a transient failure:
+    if not ready(order_id):
+        self.apply_async(args=(order_id,), countdown=30)
+```
+
+### `self.request` attributes
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `id` | `str` | The QStash message id (task id). A generated uuid in eager/direct execution. |
+| `retries` | `int` | Current delivery attempt count from QStash's `Upstash-Retried` header. `0` when absent or in eager mode. |
+| `correlation_id` | `str` | Correlation id for the request (the message id at the webhook; the generated id in eager mode). |
+| `task_name` | `str` | The task's name. |
+| `args` | `tuple` | Positional arguments the task was called with. |
+| `kwargs` | `dict` | Keyword arguments the task was called with. |
+
+The bound `self` also delegates to the underlying task, so `self.name`,
+`self.delay(...)`, `self.apply_async(...)`, and `self.s(...)` are all available
+for self-rescheduling and chaining.
+
+A fresh bound object is built for every call, so per-call request state is never
+shared across concurrent webhook deliveries (thread-safe by construction).
+`bind=True` works identically for `async def` tasks, which are awaited to
+completion.
+
+---
+
+## Task Chaining (`link=` / `.s()`)
+
+A minimal, sequential "run B after A succeeds" chain (the common Celery `link`
+case). Groups, chords, and parallel canvas are intentionally out of scope.
+
+### `.s()` / `.si()` signatures
+
+`task.s(*args, **kwargs)` returns a `Signature`: a lightweight, serializable
+reference to a task call (its function path plus the args/kwargs to invoke it
+with). `.si()` is the immutable variant; it behaves identically here because the
+parent task's return value is **not** forwarded to linked tasks.
+
+```python
+sig = send_receipt.s(order_id=42)
+sig.function_path  # "myapp.tasks.send_receipt"
+```
+
+### Linking with `apply_async(link=...)`
+
+```python
+from myapp.tasks import charge_card, send_receipt, notify_warehouse
+
+# Run send_receipt after charge_card succeeds
+charge_card.apply_async(args=(order_id,), link=send_receipt.s(order_id))
+
+# Fan out to several follow-ups (each enqueued after success)
+charge_card.apply_async(
+    args=(order_id,),
+    link=[send_receipt.s(order_id), notify_warehouse.s(order_id)],
+)
+```
+
+How it works:
+
+- The link signatures are serialized into task A's QStash payload under
+  `on_success`.
+- After A executes successfully (and its result is stored), the webhook handler
+  enqueues each linked task through its normal `apply_async` path.
+- Each linked function path is validated against the registered-task allowlist
+  (`discover_tasks`). Links that are not registered `@stashed_task`s, cannot be
+  imported, or fail to enqueue are logged and skipped; a chaining problem never
+  fails task A's `200` response.
+- In [eager mode](#testing-tasks-eager-mode) (and `.apply()`), links run inline
+  after a successful parent, so chains can be asserted in tests with no network.
+
+`delay()` has no options parameter, so chaining is done via
+`apply_async(link=...)` only (this matches Celery).
 
 ---
 

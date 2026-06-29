@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import logging
 import time
 import traceback as traceback_module
 import uuid
@@ -12,6 +13,7 @@ from functools import partial
 from typing import Any
 from typing import Generic
 from typing import TypeVar
+from typing import cast
 from typing import overload
 
 from asgiref.sync import async_to_sync
@@ -21,9 +23,13 @@ from django.core.exceptions import ImproperlyConfigured
 from django_qstash.callbacks import get_callback_url
 from django_qstash.client import qstash_client
 from django_qstash.db.models import TaskStatus
+from django_qstash.discovery.utils import discover_tasks
 from django_qstash.exceptions import TaskResultError
 from django_qstash.exceptions import TaskTimeoutError
 from django_qstash.settings import qstash_settings
+from django_qstash.utils import import_string
+
+logger = logging.getLogger(__name__)
 
 R = TypeVar("R")
 T = TypeVar("T")
@@ -124,6 +130,139 @@ def _supported_kwargs(
     return options
 
 
+class TaskRequest:
+    """Celery-compatible ``self.request`` context for ``bind=True`` tasks.
+
+    A fresh instance is built for every execution (eager, direct, or webhook),
+    so concurrent deliveries never share per-call request state.
+    """
+
+    def __init__(
+        self,
+        *,
+        id: str,
+        retries: int = 0,
+        correlation_id: str = "",
+        task_name: str = "",
+        args: tuple[Any, ...] = (),
+        kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        self.id = id
+        self.retries = retries
+        self.correlation_id = correlation_id
+        self.task_name = task_name
+        self.args = args
+        self.kwargs = kwargs if kwargs is not None else {}
+
+
+class BoundTask:
+    """Per-call ``self`` passed to a ``bind=True`` task body.
+
+    Holds the :class:`TaskRequest` for this single execution and delegates every
+    other attribute (``name``, ``delay``, ``apply_async``, ``s``, ...) to the
+    shared :class:`QStashTask`. Building a fresh proxy per call keeps mutable
+    request state off the shared task instance, which is required for thread
+    safety under concurrent webhook deliveries.
+    """
+
+    def __init__(self, task: QStashTask[Any], request: TaskRequest) -> None:
+        self._task = task
+        self.request = request
+
+    def __getattr__(self, name: str) -> Any:
+        # Only reached for attributes not set on the proxy itself
+        # (i.e. everything except ``_task`` and ``request``).
+        return getattr(self._task, name)
+
+
+class Signature:
+    """A lightweight, serializable reference to a task call (Celery ``.s()``).
+
+    Captures the target task's function path plus the args/kwargs/options to
+    invoke it with. Used by ``apply_async(link=...)`` to chain a follow-up task
+    after the parent succeeds. The parent's return value is intentionally not
+    forwarded to the linked task (see the chaining docs).
+    """
+
+    def __init__(
+        self,
+        function: str,
+        module: str,
+        args: tuple[Any, ...] = (),
+        kwargs: dict[str, Any] | None = None,
+        options: dict[str, Any] | None = None,
+        immutable: bool = False,
+    ) -> None:
+        self.function = function
+        self.module = module
+        self.args = args
+        self.kwargs = kwargs if kwargs is not None else {}
+        self.options = options if options is not None else {}
+        self.immutable = immutable
+
+    @property
+    def function_path(self) -> str:
+        return f"{self.module}.{self.function}"
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to the JSON-friendly form stored in a task's payload."""
+        return {
+            "function": self.function,
+            "module": self.module,
+            "args": list(self.args),
+            "kwargs": self.kwargs,
+            "options": self.options,
+        }
+
+
+def _normalize_links(
+    link: Signature | list[Signature] | tuple[Signature, ...] | None,
+) -> list[Signature]:
+    """Coerce a ``link=`` value into a list of :class:`Signature` objects."""
+    if link is None:
+        return []
+    if isinstance(link, Signature):
+        return [link]
+    return list(link)
+
+
+def enqueue_links(links: list[dict[str, Any]]) -> None:
+    """Resolve and enqueue serialized success-link signatures.
+
+    Each link is validated against the registered-task allowlist
+    (``discover_tasks``); links that are not registered, cannot be imported, or
+    fail to enqueue are logged and skipped so a chaining problem never fails the
+    parent task. In eager mode each linked task runs inline (its own
+    ``apply_async`` is eager).
+    """
+    if not links:
+        return
+    try:
+        registered = set(discover_tasks(locations_only=True))
+    except Exception as exc:
+        logger.warning("Could not resolve linked tasks for chaining: %s", exc)
+        return
+    for link in links:
+        function_path = f"{link.get('module')}.{link.get('function')}"
+        if function_path not in registered:
+            logger.warning(
+                "Skipping linked task %s: not a registered @stashed_task",
+                function_path,
+            )
+            continue
+        try:
+            task = import_string(function_path)
+            options = dict(link.get("options") or {})
+            task.apply_async(
+                args=tuple(link.get("args") or ()),
+                kwargs=dict(link.get("kwargs") or {}),
+                **options,
+            )
+        except Exception as exc:
+            logger.warning("Failed to enqueue linked task %s: %s", function_path, exc)
+            continue
+
+
 class QStashTask(Generic[R]):
     def __init__(
         self,
@@ -131,12 +270,14 @@ class QStashTask(Generic[R]):
         name: str | None = None,
         delay_seconds: int | None = None,
         deduplicated: bool = False,
+        bind: bool = False,
         **options: Any,
     ) -> None:
         self.func = func
         self.name = name or (func.__name__ if func else None)
         self.delay_seconds = delay_seconds
         self.deduplicated = deduplicated
+        self.bind = bind
         self.options: dict[str, Any] = dict(options)
 
         if func is not None:
@@ -173,9 +314,13 @@ class QStashTask(Generic[R]):
                 name=self.name,
                 delay_seconds=self.delay_seconds,
                 deduplicated=self.deduplicated,
+                bind=self.bind,
                 **self.options,
             )
 
+        if self.bind:
+            request = self._eager_request(args, kwargs)
+            return cast(R, self.run_with_context(request, *args, **kwargs))
         return self.func(*args, **kwargs)
 
     @property
@@ -195,6 +340,65 @@ class QStashTask(Generic[R]):
         if inspect.iscoroutinefunction(self.func):
             return async_to_sync(self.func)(*args, **kwargs)
         return self.func(*args, **kwargs)
+
+    def run_with_context(self, request: TaskRequest, *args: Any, **kwargs: Any) -> Any:
+        """Run the task body, injecting a bound ``self`` when ``bind=True``.
+
+        Context-aware entry point used by the webhook handler and eager
+        execution. When ``bind`` is True a fresh :class:`BoundTask` proxy is
+        passed as the leading positional argument (carrying ``request``);
+        otherwise the body is invoked exactly as a plain call, with no extra
+        leading argument. Coroutine task functions are awaited via ``_run``.
+        """
+        if self.bind:
+            bound = BoundTask(self, request)
+            return self._run(bound, *args, **kwargs)
+        return self._run(*args, **kwargs)
+
+    def _eager_request(
+        self, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> TaskRequest:
+        """Build a request for inline execution (direct call / eager / apply)."""
+        task_id = str(uuid.uuid4())
+        return TaskRequest(
+            id=task_id,
+            retries=0,
+            correlation_id=task_id,
+            task_name=self.name or "",
+            args=tuple(args),
+            kwargs=dict(kwargs),
+        )
+
+    def _signature(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *,
+        immutable: bool,
+    ) -> Signature:
+        if self.func is None:
+            raise ImproperlyConfigured(
+                "QStashTask must wrap a function before building a signature"
+            )
+        return Signature(
+            function=self.func.__name__,
+            module=self.func.__module__,
+            args=args,
+            kwargs=kwargs,
+            immutable=immutable,
+        )
+
+    def s(self, *args: Any, **kwargs: Any) -> Signature:
+        """Celery-compatible signature: capture a call for later chaining."""
+        return self._signature(args, kwargs, immutable=False)
+
+    def si(self, *args: Any, **kwargs: Any) -> Signature:
+        """Immutable signature variant of :meth:`s` (Celery ``.si()``).
+
+        Behaves identically to ``.s()`` here because django-qstash does not
+        forward the parent task's result to linked tasks.
+        """
+        return self._signature(args, kwargs, immutable=True)
 
     def _message_options(
         self,
@@ -240,12 +444,13 @@ class QStashTask(Generic[R]):
         kwargs: dict[str, Any],
         countdown: int | None = None,
         eta: datetime | int | float | None = None,
+        link: Signature | list[Signature] | None = None,
         **options: Any,
     ) -> AsyncResult:
         if self.func is None:
             raise ImproperlyConfigured("QStashTask must wrap a function before queuing")
 
-        payload = {
+        payload: dict[str, Any] = {
             "function": self.func.__name__,
             "module": self.func.__module__,
             "args": args,
@@ -253,6 +458,10 @@ class QStashTask(Generic[R]):
             "task_name": self.name,
             "options": self.options,
         }
+
+        links = _normalize_links(link)
+        if links:
+            payload["on_success"] = [sig.to_dict() for sig in links]
 
         url = get_callback_url()
         message_options = self._message_options(
@@ -291,22 +500,28 @@ class QStashTask(Generic[R]):
         kwargs: dict[str, Any] | None = None,
         countdown: int | None = None,
         eta: datetime | int | float | None = None,
+        link: Signature | list[Signature] | None = None,
         **options: Any,
     ) -> AsyncResult:
         """Celery-compatible apply_async() method.
 
         Runs inline (no network, no QStash config required) when
         ``DJANGO_QSTASH_ALWAYS_EAGER`` is set, otherwise publishes to QStash.
+
+        ``link`` attaches one or more :class:`Signature` success-links: after
+        this task succeeds, each linked task is enqueued (in eager mode they run
+        inline). Only registered ``@stashed_task`` links are chained.
         """
         args = args or ()
         kwargs = kwargs or {}
         if qstash_settings.DJANGO_QSTASH_ALWAYS_EAGER:
-            return self.apply(args=args, kwargs=kwargs)
+            return self.apply(args=args, kwargs=kwargs, link=link)
         return self._enqueue(
             args=args,
             kwargs=kwargs,
             countdown=countdown,
             eta=eta,
+            link=link,
             **options,
         )
 
@@ -314,6 +529,7 @@ class QStashTask(Generic[R]):
         self,
         args: tuple[Any, ...] | None = None,
         kwargs: dict[str, Any] | None = None,
+        link: Signature | list[Signature] | None = None,
         **options: Any,
     ) -> EagerResult:
         """Execute the task synchronously and return an :class:`EagerResult`.
@@ -325,22 +541,27 @@ class QStashTask(Generic[R]):
         ``.delay()``/``.apply_async()``. The captured value is returned exactly
         (no results-backend round-trip), so types are preserved.
 
+        Honors ``bind=True`` (a :class:`TaskRequest` with a generated uuid id and
+        ``retries=0`` is built) and runs any ``link`` signatures inline after a
+        successful execution.
+
         ``options`` is accepted for Celery signature compatibility and ignored;
         delivery options have no meaning for inline execution.
         """
         args = args or ()
         kwargs = kwargs or {}
-        task_id = str(uuid.uuid4())
+        request = self._eager_request(args, kwargs)
         try:
-            value = self._run(*args, **kwargs)
+            value = self.run_with_context(request, *args, **kwargs)
         except Exception as exc:
             return EagerResult(
-                task_id,
+                request.id,
                 exc,
                 TaskStatus.EXECUTION_ERROR,
                 traceback=traceback_module.format_exc(),
             )
-        return EagerResult(task_id, value, TaskStatus.SUCCESS)
+        enqueue_links([sig.to_dict() for sig in _normalize_links(link)])
+        return EagerResult(request.id, value, TaskStatus.SUCCESS)
 
 
 class AsyncResult:

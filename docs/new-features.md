@@ -89,11 +89,11 @@ and `docs/configuration.md` (`DJANGO_QSTASH_ALWAYS_EAGER`,
 
 ## Low priority / polish
 
-- **Rate limiting** on the webhook is still listed as open in `prod-readiness.md`. Signature verification lowers the risk; a documented note ("put it behind your platform's rate limiter") closes the item.
+- ~~**Rate limiting** on the webhook is still listed as open in `prod-readiness.md`. Signature verification lowers the risk; a documented note ("put it behind your platform's rate limiter") closes the item.~~ DONE. Addressed via documentation: signature verification is the authenticity control, and a concise note in `configuration.md` (plus the existing `security.md` Rate Limiting section) directs adopters to throttle at their proxy/edge/middleware layer.
 - ~~**HTTP response body** returns the literal string `"null"` for `None` results~~ — DONE. The success body now serializes `None` as a real JSON `null`.
 - ~~**`PayloadError` is logged as "Authentication error"**~~ — DONE. `PayloadError` and `SignatureError` now log distinctly (still both `400`).
-- **`discover_tasks` cache is cleared on every `request_started`** (`discovery/utils.py`). For high-traffic apps that is a `dir()`-walk of every tasks module per request. Consider clearing only on autoreload / explicit signal, or caching more durably in production.
-- **`prod-readiness.md` is stamped v0.2.3** while the project is on 0.4.1. Several of its "remaining issues" (content-type validation, HTTPS parsing, mypy in CI) are now done. Refresh or archive it to avoid signaling stale gaps.
+- ~~**`discover_tasks` cache is cleared on every `request_started`** (`discovery/utils.py`). For high-traffic apps that is a `dir()`-walk of every tasks module per request. Consider clearing only on autoreload / explicit signal, or caching more durably in production.~~ DONE. The per-request clear is now gated by `DJANGO_QSTASH_DISCOVER_CLEAR_CACHE_ON_REQUEST` (defaults to `settings.DEBUG`), so development still picks up new tasks while production keeps the cache; explicit `discover_tasks.cache_clear()` remains for manual use.
+- ~~**`prod-readiness.md` is stamped v0.2.3** while the project is on 0.4.1. Several of its "remaining issues" (content-type validation, HTTPS parsing, mypy in CI) are now done. Refresh or archive it to avoid signaling stale gaps.~~ DONE. `prod-readiness.md` is refreshed to v0.5.0 (2026-06-29) with each remaining issue re-verified against current code.
 
 ## Suggested first PR — SHIPPED
 

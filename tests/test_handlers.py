@@ -35,6 +35,20 @@ class TestTaskPayload:
         assert payload.kwargs == {"key": "value"}
         assert payload.task_name == "test_module.test_func"
         assert payload.function_path == "test_module.test_func"
+        # Absent on_success defaults to an empty list.
+        assert payload.on_success == []
+
+    def test_from_dict_with_on_success(self):
+        """on_success links from the payload are carried onto the TaskPayload."""
+        data = {
+            "function": "test_func",
+            "module": "test_module",
+            "args": [],
+            "kwargs": {},
+            "on_success": [{"function": "f", "module": "m", "args": [], "kwargs": {}}],
+        }
+        payload = TaskPayload.from_dict(data)
+        assert payload.on_success[0]["function"] == "f"
 
     def test_from_dict_invalid(self):
         data = {"invalid": "data"}
@@ -145,6 +159,8 @@ class TestQStashWebhook:
         assert response["task_name"] is None
 
     def test_execute_task_with_actual_func(self, webhook):
+        """A duck-typed object exposing actual_func is invoked via actual_func."""
+
         def actual_function(*args, **kwargs):
             return "actual result"
 
@@ -169,6 +185,34 @@ class TestQStashWebhook:
 
         assert result == "actual result"
 
+    def test_execute_task_bound_task_receives_request(self, webhook):
+        """A real bind=True QStashTask is run through run_with_context."""
+        from django_qstash.app import stashed_task
+
+        @stashed_task(bind=True)
+        def echo_request(self, value):
+            return {"id": self.request.id, "retries": self.request.retries}
+
+        payload = Mock(
+            function_path="test.path",
+            args=["hi"],
+            kwargs={},
+            task_name="test.path",
+        )
+        with (
+            patch(
+                "django_qstash.handlers.discover_tasks",
+                return_value=["test.path"],
+            ),
+            patch(
+                "django_qstash.handlers.utils.import_string",
+                return_value=echo_request,
+            ),
+        ):
+            result = webhook.execute_task(payload, request_id="msg-9", retries=2)
+
+        assert result == {"id": "msg-9", "retries": 2}
+
     def test_execute_task_plain_callable(self, webhook):
         """A plain callable without actual_func is invoked directly."""
 
@@ -192,6 +236,64 @@ class TestQStashWebhook:
             result = webhook.execute_task(payload)
 
         assert result == "plain result"
+
+    def test_retries_from_headers_present(self, webhook):
+        """The Upstash-Retried header is parsed as the delivery retry count."""
+        assert webhook._retries_from_headers({"Upstash-Retried": "4"}) == 4
+
+    def test_retries_from_headers_absent(self, webhook):
+        """A missing Upstash-Retried header yields 0 retries."""
+        assert webhook._retries_from_headers({}) == 0
+
+    def test_handle_request_passes_retries_to_execute(self, webhook):
+        """handle_request threads the Upstash-Retried count into execute_task."""
+        request = Mock(spec=HttpRequest)
+        request.body = json.dumps(
+            {"function": "test_func", "module": "test_module", "args": [], "kwargs": {}}
+        ).encode()
+        request.headers = {
+            "Upstash-Signature": "valid",
+            "Upstash-Message-Id": "msg-r",
+            "Upstash-Retried": "2",
+        }
+        request.META = {"REMOTE_ADDR": "127.0.0.1"}
+        request.build_absolute_uri.return_value = "https://example.com"
+
+        with (
+            patch.object(webhook, "verify_signature"),
+            patch.object(webhook, "execute_task", return_value="ok") as mock_execute,
+        ):
+            webhook.handle_request(request)
+
+        assert mock_execute.call_args.kwargs["request_id"] == "msg-r"
+        assert mock_execute.call_args.kwargs["retries"] == 2
+
+    def test_handle_request_enqueues_success_links(self, webhook):
+        """After a successful run, payload.on_success links are enqueued."""
+        links = [{"function": "f", "module": "m", "args": [], "kwargs": {}}]
+        request = Mock(spec=HttpRequest)
+        request.body = json.dumps(
+            {
+                "function": "test_func",
+                "module": "test_module",
+                "args": [],
+                "kwargs": {},
+                "on_success": links,
+            }
+        ).encode()
+        request.headers = {"Upstash-Signature": "valid", "Upstash-Message-Id": "123"}
+        request.META = {"REMOTE_ADDR": "127.0.0.1"}
+        request.build_absolute_uri.return_value = "https://example.com"
+
+        with (
+            patch.object(webhook, "verify_signature"),
+            patch.object(webhook, "execute_task", return_value="ok"),
+            patch("django_qstash.handlers.enqueue_links") as mock_enqueue,
+        ):
+            response, status = webhook.handle_request(request)
+
+        assert status == 200
+        mock_enqueue.assert_called_once_with(links)
 
     def test_handle_request_unexpected_error_stores_result(self, webhook):
         """An unexpected error after the payload is parsed stores an INTERNAL_ERROR."""
