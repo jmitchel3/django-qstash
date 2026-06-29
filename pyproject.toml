@@ -32,7 +32,6 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
   "Programming Language :: Python :: Implementation :: CPython",
 ]
-
 dependencies = [
   "django>=4.2",
   "qstash>=3,<4",
@@ -56,80 +55,72 @@ dev = [
   "types-requests",
 ]
 
-[tool.setuptools.package-data]
-django_qstash = [ "py.typed" ]
+[tool.setuptools]
+package-data.django_qstash = [ "py.typed" ]
 
 [tool.isort]
-add_imports = [
-  "from __future__ import annotations",
-]
-force_single_line = true
 profile = "black"
+force_single_line = true
 src_paths = [
   ".",
   "example",
   "src",
 ]
+add_imports = [
+  "from __future__ import annotations",
+]
 
 [tool.pyproject-fmt]
 max_supported_python = "3.14"
 
-[tool.pytest.ini_options]
-addopts = """\
-    --strict-config
-    --strict-markers
-    --ds=tests.settings
-    """
-django_find_project = false
-xfail_strict = true
-
-[tool.coverage.run]
-branch = true
-parallel = true
-source = [
-  "django_qstash",
-]
-omit = [
-  "*/migrations/*",
-  "*/admin.py",
-  "tests/*",
-]
-
-[tool.coverage.paths]
-source = [
-  "src/django_qstash",
-  ".tox/*/lib/python*/site-packages/django_qstash",
-]
-
-[tool.coverage.report]
-show_missing = true
-
 [tool.mypy]
-plugins = [ "mypy_django_plugin.main" ]
+mypy_path = "src/"
+namespace_packages = false
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+warn_unreachable = true
 enable_error_code = [
   "ignore-without-code",
   "redundant-expr",
   "truthy-bool",
 ]
-mypy_path = "src/"
-namespace_packages = false
 strict = true
-warn_unreachable = true
-warn_return_any = true
-warn_redundant_casts = true
-warn_unused_ignores = true
+plugins = [ "mypy_django_plugin.main" ]
+overrides = [
+  { module = "tests.*", disallow_untyped_defs = false },
+  { module = "qstash.*", ignore_missing_imports = true }
+]
 show_error_codes = true
-
-[[tool.mypy.overrides]]
-module = "tests.*"
-disallow_untyped_defs = false
-
-[[tool.mypy.overrides]]
-module = "qstash.*"
-ignore_missing_imports = true
 
 [tool.django-stubs]
 django_settings_module = "tests.settings"
+
+[tool.pytest]
+ini_options.addopts = """\
+    --strict-config
+    --strict-markers
+    --ds=tests.settings
+    """
+ini_options.xfail_strict = true
+ini_options.django_find_project = false
+
+[tool.coverage]
+run.branch = true
+run.omit = [
+  "*/admin.py",
+  "*/migrations/*",
+  "tests/*",
+]
+run.parallel = true
+run.source = [
+  "django_qstash",
+]
+paths.source = [
+  "src/django_qstash",
+  ".tox/*/lib/python*/site-packages/django_qstash",
+]
+report.show_missing = true
 
 [tool.rstcheck]
 ignore_directives = [

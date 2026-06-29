@@ -36,15 +36,15 @@ jobs:
         - '3.14'
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
 
-    - uses: actions/setup-python@v5
+    - uses: actions/setup-python@v6
       with:
         python-version: ${{ matrix.python-version }}
         allow-prereleases: true
 
     - name: Install uv
-      uses: astral-sh/setup-uv@v4
+      uses: astral-sh/setup-uv@v7
       with:
         enable-cache: true
         cache-dependency-glob: tests/requirements/*.txt
@@ -58,7 +58,7 @@ jobs:
       timeout-minutes: 15
 
     - name: Upload coverage data
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v5
       with:
         name: coverage-data-${{ matrix.python-version }}
         path: '${{ github.workspace }}/.coverage.*'
@@ -71,21 +71,21 @@ jobs:
     timeout-minutes: 10
     needs: tests
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v7
 
       - name: Install dependencies
         run: uv pip install --system coverage[toml]
         timeout-minutes: 5
 
       - name: Download data
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           path: ${{ github.workspace }}
           pattern: coverage-data-*
@@ -102,7 +102,7 @@ jobs:
 
       - name: Upload HTML report
         if: ${{ failure() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: html-report
           path: htmlcov
@@ -112,21 +112,60 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v7
 
       - name: Run mypy
         run: uv run mypy src/
         timeout-minutes: 5
 
+  pre-commit:
+    name: Pre-commit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Cache pre-commit hooks
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+
+      # Runs every hook on all files so stale formatting (e.g. an outdated
+      # black) fails CI instead of silently drifting. mypy is skipped here
+      # because the typecheck job already runs it.
+      - name: Run pre-commit
+        run: uv run pre-commit run --all-files --show-diff-on-failure --color=always
+        timeout-minutes: 8
+        env:
+          # mypy is already covered by the typecheck job. The makemigrations
+          # hook imports the sample project's settings, which read these via
+          # python-decouple; supply the committed local-dev-only values so the
+          # migration check runs in CI too.
+          SKIP: mypy
+          QSTASH_TOKEN: ci-dummy-token
+          QSTASH_CURRENT_SIGNING_KEY: ci-dummy-current
+          QSTASH_NEXT_SIGNING_KEY: ci-dummy-next
+          DJANGO_QSTASH_DOMAIN: http://localhost:8000
+
   release:
-    needs: [coverage, typecheck]
+    needs: [coverage, typecheck, pre-commit]
     if: success() && startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -137,9 +176,9 @@ jobs:
       id-token: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@v7
 
       - name: Build
         run: uv build

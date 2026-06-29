@@ -49,8 +49,7 @@ def stashed_task(
     name: str | None = None,
     deduplicated: bool = False,
     **options: dict[str, Any],
-) -> QStashTask:
-    ...
+) -> QStashTask: ...
 ```
 
 #### Parameters
@@ -144,8 +143,7 @@ Immediately queue a task for background execution.
 #### Signature
 
 ```python
-def delay(self, *args, **kwargs) -> AsyncResult:
-    ...
+def delay(self, *args, **kwargs) -> AsyncResult: ...
 ```
 
 #### Parameters
@@ -186,8 +184,7 @@ def apply_async(
     kwargs: dict | None = None,
     countdown: int | None = None,
     **options: dict[str, Any],
-) -> AsyncResult:
-    ...
+) -> AsyncResult: ...
 ```
 
 #### Parameters
@@ -251,8 +248,7 @@ def apply(
     args: tuple | None = None,
     kwargs: dict | None = None,
     **options: dict[str, Any],
-) -> EagerResult:
-    ...
+) -> EagerResult: ...
 ```
 
 #### Parameters
@@ -381,8 +377,7 @@ def get(
     timeout: float | None = None,
     interval: float | None = None,
     propagate: bool = True,
-) -> Any:
-    ...
+) -> Any: ...
 ```
 
 Blocks until a terminal result is stored, polling the results backend every
