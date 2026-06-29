@@ -154,7 +154,15 @@ jobs:
         run: uv run pre-commit run --all-files --show-diff-on-failure --color=always
         timeout-minutes: 8
         env:
+          # mypy is already covered by the typecheck job. The makemigrations
+          # hook imports the sample project's settings, which read these via
+          # python-decouple; supply the committed local-dev-only values so the
+          # migration check runs in CI too.
           SKIP: mypy
+          QSTASH_TOKEN: ci-dummy-token
+          QSTASH_CURRENT_SIGNING_KEY: ci-dummy-current
+          QSTASH_NEXT_SIGNING_KEY: ci-dummy-next
+          DJANGO_QSTASH_DOMAIN: http://localhost:8000
 
   release:
     needs: [coverage, typecheck, pre-commit]
