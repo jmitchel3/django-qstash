@@ -218,6 +218,47 @@ DJANGO_QSTASH_DISCOVER_INCLUDE_SETTINGS_DIR = True
 DJANGO_QSTASH_DISCOVER_INCLUDE_SETTINGS_DIR = False
 ```
 
+### `DJANGO_QSTASH_DISCOVER_CLEAR_CACHE_ON_REQUEST`
+
+- **Type**: `bool`
+- **Required**: No
+- **Default**: `settings.DEBUG`
+
+Task discovery results are cached so the admin and task selection fields do not re-walk every `tasks.py` module on each access. By default that cache is cleared on every `request_started` signal, which is useful in development (the autoreloader picks up newly added tasks immediately) but wasteful in production, where the task set is stable and the per-request clear forces a fresh `dir()` walk of every tasks module.
+
+This setting controls that per-request clearing. It defaults to `settings.DEBUG`, so the behavior is automatic: development clears per request, production does not. Set it explicitly to override the default in either direction.
+
+```python
+# Default: clears per request only when DEBUG is True
+# (no configuration needed)
+
+# Force the per-request clear off, even in development
+DJANGO_QSTASH_DISCOVER_CLEAR_CACHE_ON_REQUEST = False
+
+# Force the per-request clear on, even in production
+DJANGO_QSTASH_DISCOVER_CLEAR_CACHE_ON_REQUEST = True
+```
+
+The discovery cache can always be cleared manually, regardless of this setting:
+
+```python
+from django_qstash.discovery.utils import discover_tasks
+
+discover_tasks.cache_clear()
+```
+
+## Rate Limiting
+
+The webhook endpoint has no built-in rate limiting, and this is by design. Every incoming request is authenticated with QStash's cryptographic signature verification, so only legitimate requests from QStash are executed; forged requests are rejected before any task runs. That makes a built-in throttle largely redundant for authenticity, and it keeps django-qstash free of an extra cache/Redis dependency.
+
+If you still want to cap request volume (for example, to protect the resources spent verifying signatures on a flood of forged requests), apply rate limiting at your platform or edge layer in front of the webhook path:
+
+- A reverse proxy (Nginx `limit_req`, Caddy `rate_limit`).
+- An API gateway or CDN/WAF (Cloudflare, AWS WAF).
+- A Django middleware or third-party throttle (for example `django-ratelimit`) wrapping the webhook view.
+
+See the [Security Guide](security.md#rate-limiting) for concrete configuration examples of each approach.
+
 ## Environment Variables
 
 ### `QSTASH_URL`

@@ -15,6 +15,7 @@ def stashed_task(
     func: Callable[..., R],
     name: str | None = None,
     deduplicated: bool = False,
+    bind: bool = False,
     **options: Any,
 ) -> QStashTask[R]: ...
 
@@ -24,6 +25,7 @@ def stashed_task(
     func: None = None,
     name: str | None = None,
     deduplicated: bool = False,
+    bind: bool = False,
     **options: Any,
 ) -> Callable[[Callable[..., R]], QStashTask[R]]: ...
 
@@ -32,6 +34,7 @@ def stashed_task(
     func: Callable[..., R] | None = None,
     name: str | None = None,
     deduplicated: bool = False,
+    bind: bool = False,
     **options: Any,
 ) -> QStashTask[R] | Callable[[Callable[..., R]], QStashTask[R]]:
     """
@@ -49,15 +52,28 @@ def stashed_task(
         @stashed_task(name="custom_name", deduplicated=True)
         def my_task():
             pass
+
+    With ``bind=True`` the task body receives a bound ``self`` first argument
+    exposing ``self.request`` (id, retries, correlation_id, task_name, args,
+    kwargs) plus the task's own ``delay``/``apply_async`` for self-rescheduling:
+
+        @stashed_task(bind=True)
+        def my_task(self, value):
+            print(self.request.id, self.request.retries)
     """
     if func is not None:
-        return QStashTask(func, name=name, deduplicated=deduplicated, **options)
-    return lambda f: QStashTask(f, name=name, deduplicated=deduplicated, **options)
+        return QStashTask(
+            func, name=name, deduplicated=deduplicated, bind=bind, **options
+        )
+    return lambda f: QStashTask(
+        f, name=name, deduplicated=deduplicated, bind=bind, **options
+    )
 
 
 @overload
 def shared_task(
     func: Callable[..., R],
+    bind: bool = False,
     **options: Any,
 ) -> QStashTask[R]: ...
 
@@ -65,12 +81,14 @@ def shared_task(
 @overload
 def shared_task(
     func: None = None,
+    bind: bool = False,
     **options: Any,
 ) -> Callable[[Callable[..., R]], QStashTask[R]]: ...
 
 
 def shared_task(
     func: Callable[..., R] | None = None,
+    bind: bool = False,
     **options: Any,
 ) -> QStashTask[R] | Callable[[Callable[..., R]], QStashTask[R]]:
     """
@@ -83,5 +101,9 @@ def shared_task(
         @shared_task
         def my_task():
             pass
+
+        @shared_task(bind=True)
+        def my_task(self):
+            pass
     """
-    return stashed_task(func, **options)
+    return stashed_task(func, bind=bind, **options)

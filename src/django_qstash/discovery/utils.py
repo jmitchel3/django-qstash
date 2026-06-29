@@ -116,6 +116,17 @@ discover_tasks.cache_clear = _discover_tasks_impl.cache_clear  # type: ignore[at
 
 
 def clear_discover_tasks_cache(sender: type[Any] | None, **kwargs: Any) -> None:
+    # Read the setting at call time (not import time) so that
+    # @override_settings(DEBUG=...) and the explicit
+    # DJANGO_QSTASH_DISCOVER_CLEAR_CACHE_ON_REQUEST setting both take effect.
+    # Default to settings.DEBUG: clear per-request in development (to pick up
+    # newly added tasks under autoreload), but skip the dir()-walk in
+    # production where the task set is stable.
+    should_clear = getattr(
+        settings, "DJANGO_QSTASH_DISCOVER_CLEAR_CACHE_ON_REQUEST", settings.DEBUG
+    )
+    if not should_clear:
+        return
     logger.info("Clearing Django QStash discovered tasks cache")
     _discover_tasks_impl.cache_clear()
 

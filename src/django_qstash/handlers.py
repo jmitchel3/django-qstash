@@ -5,6 +5,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
+from dataclasses import field
 from typing import Any
 from typing import cast
 from urllib.parse import urlparse
@@ -14,6 +15,9 @@ from django.conf import settings
 from django.http import HttpRequest
 from qstash import Receiver
 
+from django_qstash.app.base import QStashTask
+from django_qstash.app.base import TaskRequest
+from django_qstash.app.base import enqueue_links
 from django_qstash.db.models import TaskStatus
 from django_qstash.discovery.utils import discover_tasks
 from django_qstash.settings import qstash_settings
@@ -48,6 +52,7 @@ class TaskPayload:
     kwargs: dict[str, Any]
     task_name: str
     function_path: str
+    on_success: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TaskPayload:
@@ -64,6 +69,7 @@ class TaskPayload:
             kwargs=data["kwargs"],
             task_name=data.get("task_name", function_path),
             function_path=function_path,
+            on_success=data.get("on_success") or [],
         )
 
 
@@ -121,8 +127,18 @@ class QStashWebhook:
         except json.JSONDecodeError as e:
             raise PayloadError(f"Invalid JSON payload: {e}")
 
-    def execute_task(self, payload: TaskPayload) -> Any:
-        """Import and execute the task function with timing metrics."""
+    def execute_task(
+        self,
+        payload: TaskPayload,
+        request_id: str = "",
+        retries: int = 0,
+    ) -> Any:
+        """Import and execute the task function with timing metrics.
+
+        ``request_id`` (the QStash message id) and ``retries`` (the
+        ``Upstash-Retried`` delivery count) populate the ``self.request`` context
+        for ``bind=True`` tasks; they are ignored by non-bound tasks.
+        """
         from django_qstash.signals import task_completed as task_completed_signal
         from django_qstash.signals import task_failed as task_failed_signal
         from django_qstash.signals import task_started as task_started_signal
@@ -162,7 +178,21 @@ class QStashWebhook:
 
         start_time = time.perf_counter()
         try:
-            if callable(task_func) and hasattr(task_func, "actual_func"):
+            if isinstance(task_func, QStashTask):
+                # Context-aware entry point: builds self.request for bind=True
+                # tasks (non-bound tasks ignore it). Coroutine tasks are awaited.
+                request = TaskRequest(
+                    id=request_id,
+                    retries=retries,
+                    correlation_id=current_correlation_id,
+                    task_name=payload.task_name,
+                    args=tuple(payload.args),
+                    kwargs=payload.kwargs,
+                )
+                result = task_func.run_with_context(
+                    request, *payload.args, **payload.kwargs
+                )
+            elif callable(task_func) and hasattr(task_func, "actual_func"):
                 result = task_func.actual_func(*payload.args, **payload.kwargs)
             else:
                 result = task_func(*payload.args, **payload.kwargs)
@@ -248,6 +278,13 @@ class QStashWebhook:
             "task_name": getattr(payload, "task_name", None),
         }
 
+    def _retries_from_headers(self, headers: Any) -> int:
+        """Read QStash's ``Upstash-Retried`` delivery count (0 when absent)."""
+        value = headers.get("Upstash-Retried")
+        if value is None:
+            return 0
+        return int(value)
+
     def _get_client_ip(self, request: HttpRequest) -> str:
         """Extract client IP from request headers."""
         x_forwarded_for = request.headers.get("x-forwarded-for")
@@ -327,13 +364,23 @@ class QStashWebhook:
                     "message_id": task_id,
                 }, 200
 
-            result = self.execute_task(payload)
+            result = self.execute_task(
+                payload,
+                request_id=task_id or "",
+                retries=self._retries_from_headers(request.headers),
+            )
             self._store_result(
                 payload=payload,
                 task_id=task_id,
                 status=TaskStatus.SUCCESS,
                 result=result,
             )
+
+            # Sequential chaining: after a successful run, enqueue any
+            # success-linked signatures. enqueue_links validates each link
+            # against the allowlist and skips/logs failures, so a chaining
+            # problem never affects this task's 200 response.
+            enqueue_links(payload.on_success)
 
             return {
                 "status": "success",
