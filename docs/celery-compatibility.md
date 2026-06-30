@@ -42,6 +42,7 @@ out the cases where the QStash delivery model changes the semantics.
 | Result backend | `result_backend` | `django_qstash.results` app | Optional `TaskResult` model persists status, return value, traceback, args, and kwargs. Required for `AsyncResult` lookups to resolve. See [API reference](api-reference.md#taskresult-model). |
 | `bind=True` / `self.request` | `@shared_task(bind=True)` | `@shared_task(bind=True)` | Passes a bound `self` whose `self.request` exposes `id`, `retries`, `correlation_id`, `task_name`, `args`, and `kwargs`. See [API reference](api-reference.md) for details. |
 | Sequential chaining | `chain` / `link=` | `apply_async(..., link=other_task.s(...))` | Enqueues `other_task` after the task succeeds (sequential chain only; no `group` / `chord`). See [API reference](api-reference.md) for details. |
+| In-task retry | `self.retry()` | `self.retry()` (on `bind=True`) | Aborts the current run and schedules another. In a live deployment the webhook re-enqueues a fresh QStash message (honoring `countdown`/`eta`); in eager mode the body re-runs inline. `self.request.retries` increments per attempt and `max_retries` (default 3) bounds it, raising `MaxRetriesExceededError` when exhausted. See the differences note below. |
 
 ### Message options
 
@@ -85,6 +86,15 @@ Celery user should know about.
   delivery, which is about ordering rather than per-message scheduling. Reach for
   `countdown` / `eta` on a direct (non-queued) publish when you need delayed
   delivery.
+- **`self.retry()` re-enqueues a new message.** In Celery `self.retry()` keeps
+  the same task id. Here a live retry publishes a fresh QStash message (a new
+  message id), so the `AsyncResult` you got from the original `.delay()` does not
+  follow the retried run. The current delivery is recorded with a `RETRY` status
+  and acked (HTTP 200) so QStash does not also auto-retry it, which would run the
+  task twice. The attempt count rides the message payload, so the next run sees
+  the correct `self.request.retries`. `countdown` / `eta` schedule the delay
+  before the retry is delivered; in eager mode the body simply re-runs inline and
+  those delays are ignored.
 
 ## Not yet supported
 
@@ -94,7 +104,6 @@ scope for a broker-free, worker-free design.
 | Feature | Celery | Status in django-qstash |
 |---------|--------|-------------------------|
 | Full canvas | `group`, `chord`, multi-step `chain` | Not supported. Only the sequential "run B after A succeeds" case is available via `link=`. Parallel groups and chords have no QStash primitive here. |
-| In-task retry | `self.retry()` | Not supported. Retries are driven by QStash based on the webhook HTTP response, not by re-raising from inside the task. |
 | Per-task rate limits | `rate_limit` | Not supported as a Celery-style decorator option. QStash `flow_control` covers rate/period at the message level instead. |
 | Soft/hard time limits | `soft_time_limit`, `time_limit` | Not supported. The closest control is the QStash `timeout` message option, which bounds the webhook request, not in-process soft/hard limits with `SoftTimeLimitExceeded`. |
 | Custom result backends | `result_backend` (Redis, DB, RPC, ...) | Not supported. Results are stored only via the `django_qstash.results` app (the `TaskResult` model in your Django database). |

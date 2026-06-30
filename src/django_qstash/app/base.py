@@ -24,6 +24,8 @@ from django_qstash.callbacks import get_callback_url
 from django_qstash.client import qstash_client
 from django_qstash.db.models import TaskStatus
 from django_qstash.discovery.utils import discover_tasks
+from django_qstash.exceptions import MaxRetriesExceededError
+from django_qstash.exceptions import Retry
 from django_qstash.exceptions import TaskResultError
 from django_qstash.exceptions import TaskTimeoutError
 from django_qstash.settings import qstash_settings
@@ -33,6 +35,9 @@ logger = logging.getLogger(__name__)
 
 R = TypeVar("R")
 T = TypeVar("T")
+
+# Celery's default maximum number of retries when a task does not set its own.
+DEFAULT_MAX_RETRIES = 3
 
 
 # Statuses that represent a finished task (no further state transitions expected).
@@ -173,6 +178,66 @@ class BoundTask:
         # Only reached for attributes not set on the proxy itself
         # (i.e. everything except ``_task`` and ``request``).
         return getattr(self._task, name)
+
+    def retry(
+        self,
+        *,
+        exc: BaseException | None = None,
+        countdown: int | None = None,
+        eta: datetime | int | float | None = None,
+        max_retries: int | None = None,
+        args: tuple[Any, ...] | None = None,
+        kwargs: dict[str, Any] | None = None,
+        throw: bool = True,
+        **options: Any,
+    ) -> Any:
+        """Celery-compatible ``self.retry()`` for ``bind=True`` tasks.
+
+        Aborts the current execution and schedules the task to run again. In a
+        live deployment the webhook handler re-enqueues a fresh QStash message
+        (honoring ``countdown``/``eta``); in eager mode the body is simply re-run
+        inline. ``self.request.retries`` is incremented on each attempt.
+
+        ``max_retries`` defaults to the task's ``max_retries`` option (or
+        ``DEFAULT_MAX_RETRIES``). Once ``self.request.retries`` reaches that
+        limit, the retry gives up: the original ``exc`` is re-raised if one was
+        supplied, otherwise :class:`MaxRetriesExceededError`. Pass ``args`` /
+        ``kwargs`` to override the arguments for the next attempt.
+
+        Like Celery, this normally raises (``throw=True``) so ``self.retry()``
+        and ``raise self.retry()`` are equivalent. With ``throw=False`` the
+        control-flow exception is returned instead of raised, leaving it to the
+        caller to raise.
+        """
+        request = self.request
+        retry_args = request.args if args is None else tuple(args)
+        retry_kwargs = request.kwargs if kwargs is None else dict(kwargs)
+        limit = max_retries if max_retries is not None else self._task.max_retries
+
+        if limit is not None and request.retries >= limit:
+            exhausted: BaseException = (
+                exc
+                if exc is not None
+                else MaxRetriesExceededError(
+                    f"Can't retry {self._task.name or 'task'} [{request.id}]: "
+                    f"max_retries ({limit}) exceeded"
+                )
+            )
+            if throw:
+                raise exhausted
+            return exhausted
+
+        signal = Retry(
+            args=retry_args,
+            kwargs=retry_kwargs,
+            retries=request.retries + 1,
+            countdown=countdown,
+            eta=eta,
+            exc=exc,
+        )
+        if throw:
+            raise signal
+        return signal
 
 
 class Signature:
@@ -319,9 +384,22 @@ class QStashTask(Generic[R]):
             )
 
         if self.bind:
-            request = self._eager_request(args, kwargs)
-            return cast(R, self.run_with_context(request, *args, **kwargs))
+            return cast(R, self._run_with_retries(args, kwargs))
         return self.func(*args, **kwargs)
+
+    @property
+    def max_retries(self) -> int | None:
+        """Maximum retry attempts for ``self.retry()`` (Celery ``max_retries``).
+
+        Resolved from the task's ``max_retries`` option, falling back to the
+        ``retries`` option (the QStash message-level retry count) and finally to
+        :data:`DEFAULT_MAX_RETRIES`. ``None`` means unlimited.
+        """
+        if "max_retries" in self.options:
+            return cast("int | None", self.options["max_retries"])
+        if "retries" in self.options:
+            return cast("int | None", self.options["retries"])
+        return DEFAULT_MAX_RETRIES
 
     @property
     def actual_func(self) -> Callable[..., Any]:
@@ -356,18 +434,53 @@ class QStashTask(Generic[R]):
         return self._run(*args, **kwargs)
 
     def _eager_request(
-        self, args: tuple[Any, ...], kwargs: dict[str, Any]
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *,
+        task_id: str | None = None,
+        retries: int = 0,
     ) -> TaskRequest:
         """Build a request for inline execution (direct call / eager / apply)."""
-        task_id = str(uuid.uuid4())
+        task_id = task_id or str(uuid.uuid4())
         return TaskRequest(
             id=task_id,
-            retries=0,
+            retries=retries,
             correlation_id=task_id,
             task_name=self.name or "",
             args=tuple(args),
             kwargs=dict(kwargs),
         )
+
+    def _run_with_retries(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *,
+        task_id: str | None = None,
+    ) -> Any:
+        """Run the task body inline, honoring inline ``self.retry()`` calls.
+
+        Each :class:`Retry` raised by ``self.retry()`` re-runs the body with the
+        retry's (possibly overridden) args/kwargs and an incremented retry count,
+        keeping the same task id across attempts (like Celery). The loop ends
+        when the body returns a value or raises any non-:class:`Retry`
+        exception (including :class:`MaxRetriesExceededError` once the limit is
+        reached), which propagates to the caller. ``countdown``/``eta`` carried
+        by a retry are ignored inline: eager retries run immediately.
+        """
+        task_id = task_id or str(uuid.uuid4())
+        retries = 0
+        while True:
+            request = self._eager_request(
+                args, kwargs, task_id=task_id, retries=retries
+            )
+            try:
+                return self.run_with_context(request, *args, **kwargs)
+            except Retry as retry_signal:
+                args = retry_signal.task_args
+                kwargs = retry_signal.task_kwargs
+                retries = retry_signal.retries
 
     def _signature(
         self,
@@ -445,6 +558,7 @@ class QStashTask(Generic[R]):
         countdown: int | None = None,
         eta: datetime | int | float | None = None,
         link: Signature | list[Signature] | None = None,
+        _retries: int = 0,
         **options: Any,
     ) -> AsyncResult:
         if self.func is None:
@@ -458,6 +572,13 @@ class QStashTask(Generic[R]):
             "task_name": self.name,
             "options": self.options,
         }
+
+        # Carry the retry attempt number so the next execution's
+        # ``self.request.retries`` reflects self.retry()-driven re-enqueues. The
+        # name is underscored to keep it distinct from the QStash ``retries``
+        # message option (the delivery-level auto-retry count).
+        if _retries:
+            payload["retries"] = _retries
 
         links = _normalize_links(link)
         if links:
@@ -543,25 +664,28 @@ class QStashTask(Generic[R]):
 
         Honors ``bind=True`` (a :class:`TaskRequest` with a generated uuid id and
         ``retries=0`` is built) and runs any ``link`` signatures inline after a
-        successful execution.
+        successful execution. Inline ``self.retry()`` calls re-run the body
+        immediately (ignoring ``countdown``/``eta``) until it succeeds or the
+        retry limit is exceeded, at which point the failure is captured on the
+        :class:`EagerResult`.
 
         ``options`` is accepted for Celery signature compatibility and ignored;
         delivery options have no meaning for inline execution.
         """
         args = args or ()
         kwargs = kwargs or {}
-        request = self._eager_request(args, kwargs)
+        task_id = str(uuid.uuid4())
         try:
-            value = self.run_with_context(request, *args, **kwargs)
+            value = self._run_with_retries(args, kwargs, task_id=task_id)
         except Exception as exc:
             return EagerResult(
-                request.id,
+                task_id,
                 exc,
                 TaskStatus.EXECUTION_ERROR,
                 traceback=traceback_module.format_exc(),
             )
         enqueue_links([sig.to_dict() for sig in _normalize_links(link)])
-        return EagerResult(request.id, value, TaskStatus.SUCCESS)
+        return EagerResult(task_id, value, TaskStatus.SUCCESS)
 
 
 class AsyncResult:

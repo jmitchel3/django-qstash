@@ -10,6 +10,7 @@ from django.test import override_settings
 
 from django_qstash.db.models import TaskStatus
 from django_qstash.exceptions import PayloadError
+from django_qstash.exceptions import Retry
 from django_qstash.exceptions import SignatureError
 from django_qstash.exceptions import TaskError
 from django_qstash.handlers import QStashWebhook
@@ -400,6 +401,156 @@ class TestIdempotency:
         assert status == 200
         assert response["status"] == "success"
         mock_execute.assert_called_once()
+
+
+class TestPayloadRetries:
+    def test_from_dict_defaults_to_zero(self):
+        """A payload without a retries key reports 0 attempts."""
+        payload = TaskPayload.from_dict(
+            {"function": "f", "module": "m", "args": [], "kwargs": {}}
+        )
+        assert payload.retries == 0
+
+    def test_from_dict_reads_retries(self):
+        """A retries key from a self.retry() re-enqueue is carried through."""
+        payload = TaskPayload.from_dict(
+            {"function": "f", "module": "m", "args": [], "kwargs": {}, "retries": 3}
+        )
+        assert payload.retries == 3
+
+
+class TestWebhookRetry:
+    """self.retry() inside a webhook re-enqueues a new message and acks 200."""
+
+    @pytest.fixture
+    def webhook(self):
+        return QStashWebhook()
+
+    def test_execute_task_propagates_retry(self, webhook):
+        """A Retry raised by the task body is not wrapped as a TaskError."""
+        from django_qstash.app import stashed_task
+
+        @stashed_task(bind=True, max_retries=3)
+        def retrying(self):
+            self.retry()
+
+        payload = Mock(
+            function_path="test.path",
+            args=[],
+            kwargs={},
+            task_name="test.path",
+        )
+        with (
+            patch(
+                "django_qstash.handlers.discover_tasks",
+                return_value=["test.path"],
+            ),
+            patch(
+                "django_qstash.handlers.utils.import_string",
+                return_value=retrying,
+            ),
+        ):
+            with pytest.raises(Retry) as excinfo:
+                webhook.execute_task(payload, request_id="m-1", retries=0)
+        assert excinfo.value.retries == 1
+
+    def test_handle_request_retry_acks_and_reenqueues(self, webhook):
+        """A retrying task acks 200, re-enqueues a new message, stores RETRY."""
+        from django_qstash.app import stashed_task
+
+        @stashed_task(bind=True, max_retries=3)
+        def retrying(self):
+            self.retry(countdown=15)
+
+        request = _signed_request("retry-msg")
+        with (
+            patch.object(webhook, "verify_signature"),
+            patch(
+                "django_qstash.handlers.discover_tasks",
+                return_value=["test_module.test_func"],
+            ),
+            patch(
+                "django_qstash.handlers.utils.import_string",
+                return_value=retrying,
+            ),
+            patch.object(retrying, "_enqueue") as mock_enqueue,
+            patch("django_qstash.handlers.store_task_result") as mock_store,
+        ):
+            response, status = webhook.handle_request(request)
+
+        assert status == 200
+        assert response["status"] == "retry"
+        assert response["attempt"] == 1
+        # A fresh message was published carrying the incremented attempt count.
+        mock_enqueue.assert_called_once()
+        assert mock_enqueue.call_args.kwargs["_retries"] == 1
+        assert mock_enqueue.call_args.kwargs["countdown"] == 15
+        # The current delivery is recorded as RETRY (not a terminal status).
+        assert mock_store.call_args.kwargs["status"] == TaskStatus.RETRY
+
+    def test_handle_request_uses_max_of_payload_and_header_retries(self, webhook):
+        """request.retries is the larger of the payload count and the header."""
+        request = Mock(spec=HttpRequest)
+        request.body = json.dumps(
+            {
+                "function": "test_func",
+                "module": "test_module",
+                "args": [],
+                "kwargs": {},
+                "retries": 5,
+            }
+        ).encode()
+        request.headers = {
+            "Upstash-Signature": "valid",
+            "Upstash-Message-Id": "m",
+            "Upstash-Retried": "2",
+        }
+        request.META = {"REMOTE_ADDR": "127.0.0.1"}
+        request.build_absolute_uri.return_value = "https://example.com"
+
+        with (
+            patch.object(webhook, "verify_signature"),
+            patch.object(webhook, "execute_task", return_value="ok") as mock_execute,
+        ):
+            webhook.handle_request(request)
+
+        # Payload retries (5) wins over the Upstash-Retried header (2).
+        assert mock_execute.call_args.kwargs["retries"] == 5
+
+    def test_handle_retry_helper_returns_payload(self, webhook):
+        """_handle_retry publishes, stores RETRY, and returns the ack body."""
+        from django_qstash.app import stashed_task
+        from django_qstash.exceptions import Retry as RetrySignal
+
+        @stashed_task(bind=True)
+        def some_task(self):
+            return None
+
+        payload = TaskPayload.from_dict(
+            {
+                "function": "some_task",
+                "module": "m",
+                "args": [],
+                "kwargs": {},
+                "task_name": "m.some_task",
+            }
+        )
+        signal = RetrySignal(args=(1,), kwargs={"a": 2}, retries=4, eta=99)
+        with (
+            patch(
+                "django_qstash.handlers.utils.import_string",
+                return_value=some_task,
+            ),
+            patch.object(some_task, "_enqueue") as mock_enqueue,
+            patch("django_qstash.handlers.store_task_result") as mock_store,
+        ):
+            body = webhook._handle_retry(payload, "task-id", signal)
+
+        assert body == {"status": "retry", "task_name": "m.some_task", "attempt": 4}
+        assert mock_enqueue.call_args.kwargs["args"] == (1,)
+        assert mock_enqueue.call_args.kwargs["kwargs"] == {"a": 2}
+        assert mock_enqueue.call_args.kwargs["eta"] == 99
+        mock_store.assert_called_once()
 
 
 class TestEnsureHttps:

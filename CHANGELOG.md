@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0] - 2026-06-29
+
+### Added
+- In-task retries via `self.retry()` on `bind=True` tasks, matching Celery. Calling `self.retry(exc=..., countdown=..., eta=..., args=..., kwargs=..., max_retries=...)` aborts the current run and schedules another: in a live deployment the webhook re-enqueues a fresh QStash message (carrying the incremented attempt count and any delay) and acks the current delivery with HTTP 200 and a new `RETRY` status so QStash does not also auto-retry it; in eager mode (and `.apply()`) the body re-runs inline. `self.request.retries` increments per attempt and `max_retries` (default 3) bounds it, raising `MaxRetriesExceededError` (or re-raising the supplied `exc`) once exhausted. New `Retry` and `MaxRetriesExceededError` exceptions in `django_qstash.exceptions`, and a `RETRY` value on `TaskStatus`.
+- `docs/migrating-from-celery.md`: a step-by-step Celery to django-qstash migration guide (install/config, import swap, JSON-serializable args, `bind`/`self.retry()`, chaining, scheduling, results, and eager-mode testing), linked from the docs index.
+- The `notifications` example app now exercises eager-mode testing, sequential chaining (`link=`), and `self.retry()` together: a chained `record_signup_metric` task after the welcome email, a `sync_user_to_crm` task that retries past transient failures, and a `notifications/tests.py` suite that runs the whole workflow inline with `DJANGO_QSTASH_ALWAYS_EAGER`.
+
+### Changed
+- `docs/celery-compatibility.md`: moved `self.retry()` from "Not yet supported" to "Supported" with a behavioral note on the new-message-id re-enqueue semantics under the QStash delivery model.
+
 ## [0.6.0] - 2026-06-29
 
 ### Added

@@ -24,6 +24,7 @@ from django_qstash.settings import qstash_settings
 
 from . import utils
 from .exceptions import PayloadError
+from .exceptions import Retry
 from .exceptions import SignatureError
 from .exceptions import TaskError
 from .results.services import store_task_result
@@ -53,6 +54,7 @@ class TaskPayload:
     task_name: str
     function_path: str
     on_success: list[dict[str, Any]] = field(default_factory=list)
+    retries: int = 0
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> TaskPayload:
@@ -70,6 +72,7 @@ class TaskPayload:
             task_name=data.get("task_name", function_path),
             function_path=function_path,
             on_success=data.get("on_success") or [],
+            retries=int(data.get("retries") or 0),
         )
 
 
@@ -218,6 +221,11 @@ class QStashWebhook:
 
             return result
 
+        except Retry:
+            # self.retry() aborts this run to schedule another; it is not a
+            # failure. Let it propagate so handle_request can re-enqueue and ack.
+            raise
+
         except Exception as e:
             duration = time.perf_counter() - start_time
             logger.exception(
@@ -292,6 +300,50 @@ class QStashWebhook:
             return x_forwarded_for.split(",")[0].strip()
         return str(request.META.get("REMOTE_ADDR", "unknown"))
 
+    def _handle_retry(
+        self, payload: TaskPayload, task_id: str | None, retry: Retry
+    ) -> dict[str, Any]:
+        """Re-enqueue a task that called ``self.retry()`` and ack the delivery.
+
+        A fresh QStash message is published carrying the retry's args/kwargs,
+        incremented attempt count, and any ``countdown``/``eta`` delay. The
+        current delivery is acked (200) and recorded with a ``RETRY`` status so
+        QStash does not also auto-retry the original message (which would run the
+        task twice). The task is already known to be a registered ``@stashed_task``
+        because ``execute_task`` validated it before the body ran.
+        """
+        task = utils.import_string(payload.function_path)
+        # Call _enqueue directly (not apply_async) so the retry always publishes
+        # a new QStash message and the attempt count rides the payload, never the
+        # QStash ``retries`` message option.
+        result = task._enqueue(
+            args=tuple(retry.task_args),
+            kwargs=dict(retry.task_kwargs),
+            countdown=retry.countdown,
+            eta=retry.eta,
+            _retries=retry.retries,
+        )
+        audit_logger.info(
+            "task_retry_scheduled",
+            extra={
+                "message_id": task_id,
+                "retry_message_id": getattr(result, "task_id", None),
+                "task_path": payload.function_path,
+                "attempt": retry.retries,
+                "correlation_id": correlation_id.get(""),
+            },
+        )
+        self._store_result(
+            payload=payload,
+            task_id=task_id,
+            status=TaskStatus.RETRY,
+        )
+        return {
+            "status": "retry",
+            "task_name": payload.task_name,
+            "attempt": retry.retries,
+        }
+
     def handle_request(self, request: HttpRequest) -> tuple[dict[str, Any], int]:
         """Process webhook request and return response data and status code."""
         from django_qstash.signals import webhook_received as webhook_received_signal
@@ -364,10 +416,18 @@ class QStashWebhook:
                     "message_id": task_id,
                 }, 200
 
+            # self.retry()-driven re-enqueues carry the attempt count in the
+            # payload; QStash's own redelivery count rides the Upstash-Retried
+            # header. Take whichever is larger so self.request.retries is correct
+            # regardless of which mechanism scheduled this delivery.
+            retries = max(
+                payload.retries,
+                self._retries_from_headers(request.headers),
+            )
             result = self.execute_task(
                 payload,
                 request_id=task_id or "",
-                retries=self._retries_from_headers(request.headers),
+                retries=retries,
             )
             self._store_result(
                 payload=payload,
@@ -388,6 +448,14 @@ class QStashWebhook:
                 # Serialize None as a real JSON null rather than the string "null".
                 "result": result,
             }, 200
+
+        except Retry as retry_signal:
+            # self.retry() aborts the current run to schedule another. Re-enqueue
+            # a fresh message and ack 200 so QStash stops retrying this delivery.
+            # Retry is only raised from execute_task, which runs after the payload
+            # is parsed, so payload is guaranteed non-None here.
+            parsed_payload = cast(TaskPayload, payload)
+            return self._handle_retry(parsed_payload, task_id, retry_signal), 200
 
         except SignatureError as e:
             logger.exception("Signature verification failed: %s", str(e))

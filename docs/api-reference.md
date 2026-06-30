@@ -13,6 +13,7 @@ This document provides detailed documentation for all public APIs in django-qsta
   - [.apply()](#apply)
   - [Direct Execution](#direct-execution)
 - [Bound Tasks (bind=True)](#bound-tasks-bindtrue)
+  - [self.retry()](#selfretry)
 - [Task Chaining (link / .s())](#task-chaining-link--s)
 - [Testing Tasks (Eager Mode)](#testing-tasks-eager-mode)
 - [AsyncResult](#asyncresult)
@@ -350,6 +351,64 @@ A fresh bound object is built for every call, so per-call request state is never
 shared across concurrent webhook deliveries (thread-safe by construction).
 `bind=True` works identically for `async def` tasks, which are awaited to
 completion.
+
+### `self.retry()`
+
+The Celery `self.retry()` equivalent (available on `bind=True` tasks). It aborts
+the current run and schedules another.
+
+```python
+@shared_task(bind=True, max_retries=5)
+def fetch_report(self, report_id: int):
+    try:
+        return call_flaky_api(report_id)
+    except TemporaryError as exc:
+        raise self.retry(exc=exc, countdown=10)
+```
+
+#### Signature
+
+```python
+def retry(
+    self,
+    *,
+    exc: BaseException | None = None,
+    countdown: int | None = None,
+    eta: datetime | int | float | None = None,
+    max_retries: int | None = None,
+    args: tuple | None = None,
+    kwargs: dict | None = None,
+    throw: bool = True,
+    **options: Any,
+) -> NoReturn | BaseException: ...
+```
+
+#### Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `exc` | `BaseException` | `None` | Exception to re-raise once retries are exhausted. Recorded for context. |
+| `countdown` | `int` | `None` | Seconds to wait before the retried delivery (live mode only). |
+| `eta` | `datetime \| int \| float` | `None` | Absolute time for the retried delivery (live mode only). |
+| `max_retries` | `int` | task's `max_retries` | Override the attempt limit for this call. `None` on the task means unlimited. |
+| `args` | `tuple` | the request's `args` | Override positional args for the next attempt. |
+| `kwargs` | `dict` | the request's `kwargs` | Override keyword args for the next attempt. |
+| `throw` | `bool` | `True` | Raise the control-flow exception (Celery default). With `False`, return it instead so the caller can raise it. |
+
+#### Behavior
+
+- `self.request.retries` increments on each attempt; the count rides the message
+  payload so the next delivery sees the right value.
+- When `self.request.retries` reaches the limit, `retry()` gives up: it re-raises
+  the supplied `exc` if any, otherwise raises `MaxRetriesExceededError`
+  (both from `django_qstash.exceptions`).
+- In a live deployment a retry publishes a **new** QStash message (a new message
+  id) and the current delivery is acked `200` with a `RETRY` status, so QStash
+  does not also auto-retry it. In [eager mode](#testing-tasks-eager-mode) (and
+  `.apply()`) the body simply re-runs inline and `countdown` / `eta` are ignored.
+- Because the retried run is a new message, the `AsyncResult` from the original
+  `.delay()` does not follow it. See
+  [Celery Compatibility](celery-compatibility.md) for the full note.
 
 ---
 
@@ -695,6 +754,7 @@ Enumeration of possible task statuses.
 | Status | Value | Description |
 |--------|-------|-------------|
 | `PENDING` | `"PENDING"` | Task is queued but not yet executed |
+| `RETRY` | `"RETRY"` | A delivery called `self.retry()`; a new attempt was scheduled (non-terminal) |
 | `SUCCESS` | `"SUCCESS"` | Task completed successfully |
 | `EXECUTION_ERROR` | `"EXECUTION_ERROR"` | Task raised an exception |
 | `INTERNAL_ERROR` | `"INTERNAL_ERROR"` | Unexpected error in webhook handler |
@@ -951,6 +1011,26 @@ timeout elapses before a terminal result is stored.
 
 ```python
 from django_qstash.exceptions import TaskTimeoutError
+```
+
+### `Retry`
+
+Internal control-flow signal raised by [`self.retry()`](#selfretry). You do not
+normally construct or catch it; it is handled by the eager runner and the webhook
+handler to schedule the next attempt. Listed here for completeness.
+
+```python
+from django_qstash.exceptions import Retry
+```
+
+### `MaxRetriesExceededError`
+
+Raised when `self.retry()` is called after `self.request.retries` has reached the
+task's `max_retries`. If the retry was triggered with an explicit `exc`, that
+original exception is raised instead.
+
+```python
+from django_qstash.exceptions import MaxRetriesExceededError
 ```
 
 ---
