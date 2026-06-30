@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.6.0] - 2026-06-29
 
 ### Added
 - `bind=True` support on `@shared_task`/`@stashed_task`. A bound task receives a `self` first argument whose `self.request` exposes `id`, `retries`, `correlation_id`, `task_name`, `args`, and `kwargs`. The retry count is read from QStash's `Upstash-Retried` header at the webhook; eager execution supplies a generated id and `retries=0`. Per-call request state lives on a fresh bound proxy, never on the shared task instance, so concurrent deliveries stay isolated.
