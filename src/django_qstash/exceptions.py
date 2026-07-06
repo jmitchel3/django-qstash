@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime
+from typing import Any
+
 
 class WebhookError(Exception):
     """Base exception for webhook handling errors."""
@@ -25,26 +28,6 @@ class TaskError(WebhookError):
     pass
 
 
-class TaskRetry(WebhookError):
-    """Raised internally when ``self.retry()`` schedules a replacement message."""
-
-    def __init__(
-        self,
-        message_id: str,
-        exc: BaseException | None = None,
-    ) -> None:
-        self.message_id = message_id
-        self.original_exception = exc
-        if exc is None:
-            self._message = f"Task retry scheduled as {message_id}"
-        else:
-            self._message = f"Task retry scheduled as {message_id}: {exc}"
-        super().__init__(message_id, exc)
-
-    def __str__(self) -> str:
-        return self._message
-
-
 class TaskResultError(Exception):
     """Raised when an AsyncResult is resolved for a task that did not succeed.
 
@@ -58,5 +41,49 @@ class TaskResultError(Exception):
 
 class TaskTimeoutError(TaskResultError):
     """Raised when AsyncResult.get(timeout=...) elapses before a terminal result."""
+
+    pass
+
+
+class Retry(Exception):
+    """Internal control-flow signal raised by ``self.retry()`` (Celery ``Retry``).
+
+    Carries everything needed to re-run the task: the (possibly overridden)
+    ``args``/``kwargs``, the incremented ``retries`` count, and the scheduling
+    delay (``countdown``/``eta``). It is never wrapped as a task failure; instead
+    the eager runner re-runs the body inline and the webhook handler re-enqueues
+    a fresh QStash message, mirroring Celery's "abort this run, schedule the
+    next" semantics.
+    """
+
+    def __init__(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        retries: int,
+        countdown: int | None = None,
+        eta: datetime | int | float | None = None,
+        exc: BaseException | None = None,
+    ) -> None:
+        # Forward every argument to ``Exception.__init__`` so the signal stays
+        # copy/pickle-safe (it is only ever caught in-process, but this keeps the
+        # exception well-behaved and satisfies flake8-bugbear B042).
+        super().__init__(args, kwargs, retries, countdown, eta, exc)
+        self.task_args = args
+        self.task_kwargs = kwargs
+        self.retries = retries
+        self.countdown = countdown
+        self.eta = eta
+        self.exc = exc
+
+
+class MaxRetriesExceededError(Exception):
+    """Raised when ``self.retry()`` is called after the retry limit is reached.
+
+    Mirrors Celery's ``MaxRetriesExceededError``: once ``self.request.retries``
+    reaches the task's ``max_retries`` the next ``self.retry()`` gives up. If the
+    retry was triggered with an explicit ``exc`` that original exception is
+    re-raised instead of this one.
+    """
 
     pass

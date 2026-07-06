@@ -18,7 +18,6 @@ from django_qstash.app.base import _supported_kwargs
 from django_qstash.app.base import _timestamp
 from django_qstash.db.models import TaskStatus
 from django_qstash.exceptions import TaskResultError
-from django_qstash.exceptions import TaskRetry
 from django_qstash.exceptions import TaskTimeoutError
 from django_qstash.results.services import store_task_result
 
@@ -266,11 +265,6 @@ def failing_task():
     raise ValueError("boom")
 
 
-@stashed_task
-def retrying_task():
-    raise TaskRetry("retry-msg")
-
-
 class TestAsyncResult:
     def test_id_property(self):
         result = AsyncResult("abc-123")
@@ -303,35 +297,6 @@ class TestAsyncResult:
         # 42 was wrapped as {"result": 42}; AsyncResult unwraps it.
         assert result.result == 42
         assert result.get(timeout=1) == 42
-
-    @pytest.mark.django_db
-    def test_retry_lineage_resolves_to_terminal_retry_row(self):
-        """The original AsyncResult follows self.retry() replacement messages."""
-        store_task_result(
-            task_id="msg-original",
-            task_name="t",
-            status=TaskStatus.RETRY,
-            result={"retry_task_id": "msg-retry"},
-            function_path="pkg.tasks.run",
-            correlation_id="root-1",
-            attempt=0,
-        )
-        store_task_result(
-            task_id="msg-retry",
-            task_name="t",
-            status=TaskStatus.SUCCESS,
-            result="done",
-            function_path="pkg.tasks.run",
-            correlation_id="root-1",
-            parent_task_id="msg-original",
-            attempt=1,
-        )
-
-        result = AsyncResult("msg-original")
-
-        assert result.status == TaskStatus.SUCCESS
-        assert result.ready() is True
-        assert result.get(timeout=1) == "done"
 
     @pytest.mark.django_db
     def test_retry_row_without_lineage_is_returned(self):
@@ -440,14 +405,6 @@ class TestApply:
         result = failing_task.apply()
         returned = result.get(propagate=False)
         assert isinstance(returned, ValueError)
-
-    def test_apply_captures_retry_without_original_exception(self):
-        """A retrying task yields a RETRY result without an exception traceback."""
-        result = retrying_task.apply()
-
-        assert result.status == TaskStatus.RETRY
-        assert result.result == {"retry_task_id": "retry-msg"}
-        assert result.traceback is None
 
     def test_apply_runs_async_task(self):
         """apply() runs coroutine task functions to completion."""

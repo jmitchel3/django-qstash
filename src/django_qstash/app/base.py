@@ -12,7 +12,6 @@ from datetime import timezone
 from functools import partial
 from typing import Any
 from typing import Generic
-from typing import NoReturn
 from typing import TypeVar
 from typing import cast
 from typing import overload
@@ -25,8 +24,9 @@ from django_qstash.callbacks import get_callback_url
 from django_qstash.client import qstash_client
 from django_qstash.db.models import TaskStatus
 from django_qstash.discovery.utils import discover_tasks
+from django_qstash.exceptions import MaxRetriesExceededError
+from django_qstash.exceptions import Retry
 from django_qstash.exceptions import TaskResultError
-from django_qstash.exceptions import TaskRetry
 from django_qstash.exceptions import TaskTimeoutError
 from django_qstash.settings import qstash_settings
 from django_qstash.utils import import_string
@@ -35,6 +35,9 @@ logger = logging.getLogger(__name__)
 
 R = TypeVar("R")
 T = TypeVar("T")
+
+# Celery's default maximum number of retries when a task does not set its own.
+DEFAULT_MAX_RETRIES = 3
 
 
 # Statuses that represent a finished task (no further state transitions expected).
@@ -182,27 +185,63 @@ class BoundTask:
 
     def retry(
         self,
+        *,
         exc: BaseException | None = None,
-        args: tuple[Any, ...] | None = None,
-        kwargs: dict[str, Any] | None = None,
         countdown: int | None = None,
         eta: datetime | int | float | None = None,
+        max_retries: int | None = None,
+        args: tuple[Any, ...] | None = None,
+        kwargs: dict[str, Any] | None = None,
+        throw: bool = True,
         **options: Any,
-    ) -> NoReturn:
-        """Requeue the current task and stop the current execution."""
-        retry_args = self.request.args if args is None else args
-        retry_kwargs = self.request.kwargs if kwargs is None else kwargs
-        result = self._task._enqueue(
+    ) -> Any:
+        """Celery-compatible ``self.retry()`` for ``bind=True`` tasks.
+
+        Aborts the current execution and schedules the task to run again. In a
+        live deployment the webhook handler re-enqueues a fresh QStash message
+        (honoring ``countdown``/``eta``); in eager mode the body is simply re-run
+        inline. ``self.request.retries`` is incremented on each attempt.
+
+        ``max_retries`` defaults to the task's ``max_retries`` option (or
+        ``DEFAULT_MAX_RETRIES``). Once ``self.request.retries`` reaches that
+        limit, the retry gives up: the original ``exc`` is re-raised if one was
+        supplied, otherwise :class:`MaxRetriesExceededError`. Pass ``args`` /
+        ``kwargs`` to override the arguments for the next attempt.
+
+        Like Celery, this normally raises (``throw=True``) so ``self.retry()``
+        and ``raise self.retry()`` are equivalent. With ``throw=False`` the
+        control-flow exception is returned instead of raised, leaving it to the
+        caller to raise.
+        """
+        request = self.request
+        retry_args = request.args if args is None else tuple(args)
+        retry_kwargs = request.kwargs if kwargs is None else dict(kwargs)
+        limit = max_retries if max_retries is not None else self._task.max_retries
+
+        if limit is not None and request.retries >= limit:
+            exhausted: BaseException = (
+                exc
+                if exc is not None
+                else MaxRetriesExceededError(
+                    f"Can't retry {self._task.name or 'task'} [{request.id}]: "
+                    f"max_retries ({limit}) exceeded"
+                )
+            )
+            if throw:
+                raise exhausted
+            return exhausted
+
+        signal = Retry(
             args=retry_args,
             kwargs=retry_kwargs,
+            retries=request.retries + 1,
             countdown=countdown,
             eta=eta,
-            correlation_id=self.request.correlation_id or self.request.id,
-            parent_task_id=self.request.id,
-            attempt=self.request.retries + 1,
-            **options,
+            exc=exc,
         )
-        raise TaskRetry(result.task_id, exc=exc)
+        if throw:
+            raise signal
+        return signal
 
 
 class Signature:
@@ -359,9 +398,22 @@ class QStashTask(Generic[R]):
             )
 
         if self.bind:
-            request = self._eager_request(args, kwargs)
-            return cast(R, self.run_with_context(request, *args, **kwargs))
+            return cast(R, self._run_with_retries(args, kwargs))
         return self.func(*args, **kwargs)
+
+    @property
+    def max_retries(self) -> int | None:
+        """Maximum retry attempts for ``self.retry()`` (Celery ``max_retries``).
+
+        Resolved from the task's ``max_retries`` option, falling back to the
+        ``retries`` option (the QStash message-level retry count) and finally to
+        :data:`DEFAULT_MAX_RETRIES`. ``None`` means unlimited.
+        """
+        if "max_retries" in self.options:
+            return cast("int | None", self.options["max_retries"])
+        if "retries" in self.options:
+            return cast("int | None", self.options["retries"])
+        return DEFAULT_MAX_RETRIES
 
     @property
     def actual_func(self) -> Callable[..., Any]:
@@ -400,22 +452,60 @@ class QStashTask(Generic[R]):
         args: tuple[Any, ...],
         kwargs: dict[str, Any],
         *,
+        task_id: str | None = None,
+        retries: int = 0,
         correlation_id: str = "",
         parent_task_id: str = "",
-        attempt: int = 0,
     ) -> TaskRequest:
         """Build a request for inline execution (direct call / eager / apply)."""
-        task_id = str(uuid.uuid4())
+        task_id = task_id or str(uuid.uuid4())
         root_id = correlation_id or task_id
         return TaskRequest(
             id=task_id,
-            retries=attempt,
+            retries=retries,
             correlation_id=root_id,
             parent_task_id=parent_task_id,
             task_name=self.name or "",
             args=tuple(args),
             kwargs=dict(kwargs),
         )
+
+    def _run_with_retries(
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *,
+        task_id: str | None = None,
+        retries: int = 0,
+        correlation_id: str = "",
+        parent_task_id: str = "",
+    ) -> Any:
+        """Run the task body inline, honoring inline ``self.retry()`` calls.
+
+        Each :class:`Retry` raised by ``self.retry()`` re-runs the body with the
+        retry's (possibly overridden) args/kwargs and an incremented retry count,
+        keeping the same task id across attempts (like Celery). The loop ends
+        when the body returns a value or raises any non-:class:`Retry`
+        exception (including :class:`MaxRetriesExceededError` once the limit is
+        reached), which propagates to the caller. ``countdown``/``eta`` carried
+        by a retry are ignored inline: eager retries run immediately.
+        """
+        task_id = task_id or str(uuid.uuid4())
+        while True:
+            request = self._eager_request(
+                args,
+                kwargs,
+                task_id=task_id,
+                retries=retries,
+                correlation_id=correlation_id,
+                parent_task_id=parent_task_id,
+            )
+            try:
+                return self.run_with_context(request, *args, **kwargs)
+            except Retry as retry_signal:
+                args = retry_signal.task_args
+                kwargs = retry_signal.task_kwargs
+                retries = retry_signal.retries
 
     def _signature(
         self,
@@ -495,7 +585,7 @@ class QStashTask(Generic[R]):
         link: Signature | list[Signature] | None = None,
         correlation_id: str = "",
         parent_task_id: str = "",
-        attempt: int = 0,
+        _retries: int = 0,
         **options: Any,
     ) -> AsyncResult:
         if self.func is None:
@@ -513,8 +603,13 @@ class QStashTask(Generic[R]):
             payload["correlation_id"] = correlation_id
         if parent_task_id:
             payload["parent_task_id"] = parent_task_id
-        if attempt:
-            payload["attempt"] = attempt
+
+        # Carry the retry attempt number so the next execution's
+        # ``self.request.retries`` reflects self.retry()-driven re-enqueues. The
+        # name is underscored to keep it distinct from the QStash ``retries``
+        # message option (the delivery-level auto-retry count).
+        if _retries:
+            payload["retries"] = _retries
 
         links = _normalize_links(link)
         if links:
@@ -560,7 +655,7 @@ class QStashTask(Generic[R]):
         link: Signature | list[Signature] | None = None,
         _qstash_correlation_id: str = "",
         _qstash_parent_task_id: str = "",
-        _qstash_attempt: int = 0,
+        _qstash_retries: int = 0,
         **options: Any,
     ) -> AsyncResult:
         """Celery-compatible apply_async() method.
@@ -581,7 +676,7 @@ class QStashTask(Generic[R]):
                 link=link,
                 _qstash_correlation_id=_qstash_correlation_id,
                 _qstash_parent_task_id=_qstash_parent_task_id,
-                _qstash_attempt=_qstash_attempt,
+                _qstash_retries=_qstash_retries,
             )
         return self._enqueue(
             args=args,
@@ -591,7 +686,7 @@ class QStashTask(Generic[R]):
             link=link,
             correlation_id=_qstash_correlation_id,
             parent_task_id=_qstash_parent_task_id,
-            attempt=_qstash_attempt,
+            _retries=_qstash_retries,
             **options,
         )
 
@@ -602,7 +697,7 @@ class QStashTask(Generic[R]):
         link: Signature | list[Signature] | None = None,
         _qstash_correlation_id: str = "",
         _qstash_parent_task_id: str = "",
-        _qstash_attempt: int = 0,
+        _qstash_retries: int = 0,
         **options: Any,
     ) -> EagerResult:
         """Execute the task synchronously and return an :class:`EagerResult`.
@@ -616,44 +711,39 @@ class QStashTask(Generic[R]):
 
         Honors ``bind=True`` (a :class:`TaskRequest` with a generated uuid id and
         ``retries=0`` is built) and runs any ``link`` signatures inline after a
-        successful execution.
+        successful execution. Inline ``self.retry()`` calls re-run the body
+        immediately (ignoring ``countdown``/``eta``) until it succeeds or the
+        retry limit is exceeded, at which point the failure is captured on the
+        :class:`EagerResult`.
 
         ``options`` is accepted for Celery signature compatibility and ignored;
         delivery options have no meaning for inline execution.
         """
         args = args or ()
         kwargs = kwargs or {}
-        request = self._eager_request(
-            args,
-            kwargs,
-            correlation_id=_qstash_correlation_id,
-            parent_task_id=_qstash_parent_task_id,
-            attempt=_qstash_attempt,
-        )
+        task_id = str(uuid.uuid4())
         try:
-            value = self.run_with_context(request, *args, **kwargs)
-        except TaskRetry as exc:
-            return EagerResult(
-                request.id,
-                {"retry_task_id": exc.message_id},
-                TaskStatus.RETRY,
-                traceback=(
-                    str(exc.original_exception) if exc.original_exception else None
-                ),
+            value = self._run_with_retries(
+                args,
+                kwargs,
+                task_id=task_id,
+                retries=_qstash_retries,
+                correlation_id=_qstash_correlation_id,
+                parent_task_id=_qstash_parent_task_id,
             )
         except Exception as exc:
             return EagerResult(
-                request.id,
+                task_id,
                 exc,
                 TaskStatus.EXECUTION_ERROR,
                 traceback=traceback_module.format_exc(),
             )
         enqueue_links(
             [sig.to_dict() for sig in _normalize_links(link)],
-            correlation_id=request.correlation_id,
-            parent_task_id=request.id,
+            correlation_id=_qstash_correlation_id or task_id,
+            parent_task_id=task_id,
         )
-        return EagerResult(request.id, value, TaskStatus.SUCCESS)
+        return EagerResult(task_id, value, TaskStatus.SUCCESS)
 
 
 class AsyncResult:
@@ -681,30 +771,11 @@ class AsyncResult:
             TaskResult = apps.get_model("django_qstash_results", "TaskResult")
         except LookupError:
             return None
-        row = (
+        return (
             TaskResult.objects.filter(task_id=self.task_id)
             .order_by("-date_done", "-date_created")
             .first()
         )
-        if row is None:
-            return None
-        if row.status != TaskStatus.RETRY:
-            return row
-
-        lineage_id = getattr(row, "correlation_id", "") or self.correlation_id
-        function_path = getattr(row, "function_path", None)
-        if not lineage_id or not function_path:
-            return row
-        terminal = (
-            TaskResult.objects.filter(
-                correlation_id=lineage_id,
-                function_path=function_path,
-                status__in=TERMINAL_STATUSES,
-            )
-            .order_by("-attempt", "-date_done", "-date_created")
-            .first()
-        )
-        return terminal or row
 
     @property
     def status(self) -> str:

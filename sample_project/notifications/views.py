@@ -8,6 +8,7 @@ from django.utils import timezone
 from django_qstash.results.models import TaskResult
 from django_qstash.results.services import calculate_task_metrics
 
+from .tasks import record_signup_metric
 from .tasks import send_reminder_notification
 from .tasks import send_welcome_notification
 
@@ -18,8 +19,12 @@ def register_user(request):
     if request.method == "POST":
         email = request.POST.get("email")
 
-        # Send immediate welcome
-        welcome_task = send_welcome_notification.delay(email)
+        # Send immediate welcome, then chain a metrics task after it succeeds
+        # (sequential chaining via link=).
+        welcome_task = send_welcome_notification.apply_async(
+            args=[email],
+            link=record_signup_metric.s(email),
+        )
 
         # Schedule reminder for 24 hours later
         reminder_task = send_reminder_notification.apply_async(

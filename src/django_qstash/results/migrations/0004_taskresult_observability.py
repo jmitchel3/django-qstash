@@ -8,7 +8,7 @@ class Migration(migrations.Migration):
     dependencies = [
         (
             "django_qstash_results",
-            "0002_taskresult_function_path_alter_taskresult_status_and_more",
+            "0003_alter_taskresult_status",
         ),
     ]
 
@@ -35,23 +35,6 @@ class Migration(migrations.Migration):
             name="parent_task_id",
             field=models.CharField(
                 blank=True, db_index=True, default="", max_length=255
-            ),
-        ),
-        migrations.AlterField(
-            model_name="taskresult",
-            name="status",
-            field=models.CharField(
-                choices=[
-                    ("PENDING", "Pending"),
-                    ("RETRY", "Retry"),
-                    ("SUCCESS", "Success"),
-                    ("EXECUTION_ERROR", "Execution Error"),
-                    ("INTERNAL_ERROR", "Internal Error"),
-                    ("OTHER_ERROR", "Other Error"),
-                    ("UNKNOWN", "Unknown"),
-                ],
-                default="PENDING",
-                max_length=50,
             ),
         ),
         migrations.AlterModelOptions(
