@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.0] - 2026-07-06
+
+### Added
+- Serverless observability for task results: `TaskResult` now records `correlation_id`, `parent_task_id`, retry `attempt`, and `duration_ms`, with a matching migration and admin dashboard updates for filtering, searching, lineage, duration, and result summaries.
+- New `qstash_metrics` management command for recent task-result aggregates, success rate, and p50/p95 duration output in text or JSON.
+- New `qstash_requeue` management command plus requeue services for failed `TaskResult` rows and QStash DLQ messages.
+- `docs/observability.md` and expanded API/Celery compatibility docs covering metrics, requeue workflows, DLQ inspection, structured logs, and signals.
+- The sample notifications dashboard now surfaces observability fields and task summaries.
+
+### Changed
+- Webhook execution now propagates correlation, parent task, retry attempt, and duration metadata through stored results, linked tasks, and retry re-enqueues.
+- `qstash_dlq` output includes summary counts to make dead-letter triage easier.
+- Discovery cache clearing logs at a lower level to reduce request-time log noise.
+
 ## [0.7.0] - 2026-06-29
 
 ### Added
