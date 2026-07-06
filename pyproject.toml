@@ -6,10 +6,11 @@ requires = [
 
 [project]
 name = "django-qstash"
-version = "0.8.0"
+version = "0.8.1"
 description = "A drop-in replacement for Celery's shared_task with Upstash QStash."
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = [ "LICENSE" ]
 authors = [
   { name = "Justin Mitchel", email = "justin@codingforentrepreneurs.com" },
 ]
@@ -21,7 +22,6 @@ classifiers = [
   "Framework :: Django :: 5.2",
   "Framework :: Django :: 6.0",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
   "Natural Language :: English",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3 :: Only",

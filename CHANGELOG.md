@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.8.1] - 2026-07-06
+
+### Changed
+- Refreshed `docs/new-features.md` into a historical roadmap/status page so it
+  no longer lists shipped Celery compatibility features as future work.
+- Modernized package license metadata to SPDX-style `license` and
+  `license-files` fields and removed the deprecated license classifier to avoid
+  setuptools build warnings.
+
 ## [0.8.0] - 2026-07-06
 
 ### Added
