@@ -228,3 +228,15 @@ class TestEnqueueCarriesRetries:
         plain_bound._enqueue(args=(), kwargs={})
         body = mock_qstash_client.message.publish_json.call_args.kwargs["body"]
         assert "retries" not in body
+
+    def test_apply_async_embeds_lineage_metadata(self, mock_qstash_client):
+        """Internal lineage metadata is serialized into the QStash body."""
+        result = plain_bound.apply_async(
+            _qstash_correlation_id="root-1",
+            _qstash_parent_task_id="parent-1",
+        )
+
+        body = mock_qstash_client.message.publish_json.call_args.kwargs["body"]
+        assert body["correlation_id"] == "root-1"
+        assert body["parent_task_id"] == "parent-1"
+        assert result.correlation_id == "root-1"

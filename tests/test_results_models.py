@@ -27,6 +27,11 @@ class TestTaskResult:
         assert task_result.traceback is None
         assert task_result.args is None
         assert task_result.kwargs is None
+        assert task_result.correlation_id == ""
+        assert task_result.parent_task_id == ""
+        assert task_result.attempt == 0
+        assert task_result.duration_ms is None
+        assert task_result.duration_seconds is None
 
     def test_str_representation(self):
         task_result = TaskResult.objects.create(
@@ -46,6 +51,10 @@ class TestTaskResult:
             traceback="No errors",
             args=[1, 2, 3],
             kwargs={"key": "value"},
+            correlation_id="root-456",
+            parent_task_id="test-task-123",
+            attempt=2,
+            duration_ms=1500,
         )
 
         assert task_result.status == "SUCCESS"
@@ -54,6 +63,10 @@ class TestTaskResult:
         assert task_result.traceback == "No errors"
         assert task_result.args == [1, 2, 3]
         assert task_result.kwargs == {"key": "value"}
+        assert task_result.correlation_id == "root-456"
+        assert task_result.parent_task_id == "test-task-123"
+        assert task_result.attempt == 2
+        assert task_result.duration_seconds == 1.5
 
     def test_ordering(self):
         # Create tasks with different completion dates

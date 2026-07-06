@@ -10,6 +10,7 @@ from django_qstash.app import stashed_task
 from django_qstash.app.base import BoundTask
 from django_qstash.app.base import QStashTask
 from django_qstash.app.base import TaskRequest
+from django_qstash.exceptions import Retry
 
 
 @stashed_task(bind=True)
@@ -133,6 +134,24 @@ class TestBoundTaskProxy:
         bound.apply_async(args=(3, 4))
         mock_qstash_client.message.publish_json.assert_called_once()
 
+    def test_retry_raises_signal_with_next_attempt(self, mock_qstash_client):
+        """self.retry() raises a Retry signal carrying the next attempt."""
+        request = TaskRequest(
+            id="msg-1",
+            retries=2,
+            correlation_id="root-1",
+            args=(3, 4),
+        )
+        bound = BoundTask(bound_task, request)
+
+        with pytest.raises(Retry) as exc_info:
+            bound.retry(exc=ValueError("again"), countdown=10)
+
+        assert exc_info.value.retries == 3
+        assert exc_info.value.task_args == (3, 4)
+        assert exc_info.value.countdown == 10
+        mock_qstash_client.message.publish_json.assert_not_called()
+
 
 class TestTaskRequestDefaults:
     def test_defaults(self):
@@ -140,6 +159,9 @@ class TestTaskRequestDefaults:
         request = TaskRequest(id="x")
         assert request.retries == 0
         assert request.correlation_id == ""
+        assert request.root_id == ""
+        assert request.parent_id == ""
+        assert request.parent_task_id == ""
         assert request.task_name == ""
         assert request.args == ()
         assert request.kwargs == {}

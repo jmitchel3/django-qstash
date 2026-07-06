@@ -43,6 +43,7 @@ out the cases where the QStash delivery model changes the semantics.
 | `bind=True` / `self.request` | `@shared_task(bind=True)` | `@shared_task(bind=True)` | Passes a bound `self` whose `self.request` exposes `id`, `retries`, `correlation_id`, `task_name`, `args`, and `kwargs`. See [API reference](api-reference.md) for details. |
 | Sequential chaining | `chain` / `link=` | `apply_async(..., link=other_task.s(...))` | Enqueues `other_task` after the task succeeds (sequential chain only; no `group` / `chord`). See [API reference](api-reference.md) for details. |
 | In-task retry | `self.retry()` | `self.retry()` (on `bind=True`) | Aborts the current run and schedules another. In a live deployment the webhook re-enqueues a fresh QStash message (honoring `countdown`/`eta`); in eager mode the body re-runs inline. `self.request.retries` increments per attempt and `max_retries` (default 3) bounds it, raising `MaxRetriesExceededError` when exhausted. See the differences note below. |
+| Task events / monitoring | Flower, task events | Supported (admin + metrics + logs) | No Flower process is required. Use the `TaskResult` admin dashboard, `qstash_metrics`, `qstash_requeue`, structured logs, Django signals, and `qstash_dlq`. See [Serverless Observability](observability.md). |
 
 ### Message options
 
@@ -95,6 +96,10 @@ Celery user should know about.
   the correct `self.request.retries`. `countdown` / `eta` schedule the delay
   before the retry is delivered; in eager mode the body simply re-runs inline and
   those delays are ignored.
+- **Monitoring is pull/log based.** django-qstash does not run a real-time event
+  stream. The admin and metrics command read `TaskResult`; structured logs and
+  signals are emitted during webhook execution and can be shipped to your log
+  platform.
 
 ## Not yet supported
 
@@ -107,7 +112,7 @@ scope for a broker-free, worker-free design.
 | Per-task rate limits | `rate_limit` | Not supported as a Celery-style decorator option. QStash `flow_control` covers rate/period at the message level instead. |
 | Soft/hard time limits | `soft_time_limit`, `time_limit` | Not supported. The closest control is the QStash `timeout` message option, which bounds the webhook request, not in-process soft/hard limits with `SoftTimeLimitExceeded`. |
 | Custom result backends | `result_backend` (Redis, DB, RPC, ...) | Not supported. Results are stored only via the `django_qstash.results` app (the `TaskResult` model in your Django database). |
-| Task events / monitoring | Flower, task events | Not supported. There is no event stream or Flower integration. Inspect the `TaskResult` table, the Django admin, structured logs, and the QStash DLQ command instead. |
+| Task event stream | Celery event protocol / Flower WebSocket | Not supported. There is no broker-backed event stream or Flower integration. Inspect the `TaskResult` table, Django admin, metrics command, structured logs, signals, and QStash DLQ command instead. |
 
 ## See also
 

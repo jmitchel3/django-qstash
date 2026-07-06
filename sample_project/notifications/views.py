@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 from django.shortcuts import render
 from django.utils import timezone
 
 from django_qstash.results.models import TaskResult
+from django_qstash.results.services import calculate_task_metrics
 
 from .tasks import record_signup_metric
 from .tasks import send_reminder_notification
@@ -45,7 +48,15 @@ def register_user(request):
 def task_dashboard(request):
     # Get all tasks from the last 24 hours
     recent_tasks = TaskResult.objects.filter(
-        date_done__gte=timezone.now() - timezone.timedelta(days=1)
+        date_done__gte=timezone.now() - timedelta(days=1)
     ).order_by("-date_done")
+    metrics = calculate_task_metrics(window_seconds=86400)
 
-    return render(request, "notifications/task_dashboard.html", {"tasks": recent_tasks})
+    return render(
+        request,
+        "notifications/task_dashboard.html",
+        {
+            "tasks": recent_tasks,
+            "metrics": metrics,
+        },
+    )

@@ -2,15 +2,46 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import uuid
+from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 from django.apps import apps
+from django.db.models import Count
 from django.db.models import Model
+from django.db.models import Q
 from django.utils import timezone
 
+from django_qstash.callbacks import get_callback_url
+from django_qstash.client import qstash_client
 from django_qstash.db.models import TaskStatus
 
 logger = logging.getLogger(__name__)
+
+REQUEUEABLE_STATUSES = frozenset(
+    {
+        TaskStatus.EXECUTION_ERROR,
+        TaskStatus.INTERNAL_ERROR,
+        TaskStatus.OTHER_ERROR,
+        TaskStatus.UNKNOWN,
+    }
+)
+
+
+@dataclass(frozen=True)
+class RequeueResult:
+    message_id: str
+    correlation_id: str
+    parent_task_id: str
+
+
+def duration_to_ms(duration_seconds: float | None) -> int | None:
+    """Convert a duration in seconds to rounded milliseconds."""
+    if duration_seconds is None:
+        return None
+    return max(0, round(duration_seconds * 1000))
 
 
 def function_result_to_dict(result: Any) -> dict[str, Any] | None:
@@ -71,6 +102,10 @@ def store_task_result(
     kwargs: dict[str, Any] | None = None,
     error: str | None = None,
     function_path: str | None = None,
+    correlation_id: str = "",
+    parent_task_id: str = "",
+    attempt: int = 0,
+    duration_ms: int | None = None,
 ) -> Model | None:
     """
     Store task result if the results app is installed.
@@ -85,6 +120,10 @@ def store_task_result(
         kwargs: Keyword arguments passed to the task
         error: Error message string (optional, deprecated - use traceback)
         function_path: Full dotted path to the task function
+        correlation_id: Stable root id shared by retries and linked tasks
+        parent_task_id: Message id that scheduled this task, when any
+        attempt: Zero-based retry attempt number for this task lifecycle
+        duration_ms: Execution duration in milliseconds
 
     Returns:
         TaskResult model instance if created, None if results app not installed
@@ -95,7 +134,7 @@ def store_task_result(
     try:
         TaskResult = apps.get_model("django_qstash_results", "TaskResult")
         task_result: Model = TaskResult.objects.create(
-            task_id=task_id,
+            task_id=task_id or "",
             task_name=task_name,
             status=status,
             date_done=timezone.now(),
@@ -104,6 +143,10 @@ def store_task_result(
             args=args,
             kwargs=kwargs,
             function_path=function_path,
+            correlation_id=correlation_id,
+            parent_task_id=parent_task_id,
+            attempt=max(0, attempt),
+            duration_ms=duration_ms,
         )
         return task_result
     except LookupError:
@@ -112,3 +155,210 @@ def store_task_result(
             "Django QStash Results not installed. Add `django_qstash.results` to INSTALLED_APPS and run migrations."
         )
         return None
+
+
+def _empty_metrics(
+    *,
+    window_seconds: int,
+    since: Any,
+    until: Any,
+) -> dict[str, Any]:
+    return {
+        "window_seconds": window_seconds,
+        "since": since.isoformat(),
+        "until": until.isoformat(),
+        "total": 0,
+        "counts_by_status": {},
+        "success_rate": 0.0,
+        "duration_ms": {
+            "p50": None,
+            "p95": None,
+        },
+    }
+
+
+def _percentile(values: list[int], percentile: float) -> int | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = max(0, math.ceil((percentile / 100) * len(ordered)) - 1)
+    return ordered[index]
+
+
+def calculate_task_metrics(
+    *,
+    window_seconds: int = 3600,
+    now: Any = None,
+) -> dict[str, Any]:
+    """Return lightweight TaskResult aggregates for a recent time window."""
+    until = now or timezone.now()
+    since = until - timedelta(seconds=window_seconds)
+
+    try:
+        TaskResult = apps.get_model("django_qstash_results", "TaskResult")
+    except LookupError:
+        return _empty_metrics(
+            window_seconds=window_seconds,
+            since=since,
+            until=until,
+        )
+
+    queryset = TaskResult.objects.filter(date_done__gte=since, date_done__lte=until)
+    counts_by_status = {
+        row["status"]: row["count"]
+        for row in queryset.values("status").annotate(count=Count("id"))
+    }
+    total = sum(counts_by_status.values())
+    successes = counts_by_status.get(TaskStatus.SUCCESS, 0)
+    durations = [
+        value
+        for value in queryset.exclude(duration_ms__isnull=True).values_list(
+            "duration_ms", flat=True
+        )
+        if value is not None
+    ]
+
+    return {
+        "window_seconds": window_seconds,
+        "since": since.isoformat(),
+        "until": until.isoformat(),
+        "total": total,
+        "counts_by_status": counts_by_status,
+        "success_rate": round(successes / total, 4) if total else 0.0,
+        "duration_ms": {
+            "p50": _percentile(durations, 50),
+            "p95": _percentile(durations, 95),
+        },
+    }
+
+
+def _split_function_path(function_path: str | None) -> tuple[str, str]:
+    if not function_path or "." not in function_path:
+        raise ValueError("TaskResult has no importable function_path to requeue")
+    module, function = function_path.rsplit(".", 1)
+    return module, function
+
+
+def _publish_payload(
+    payload: dict[str, Any],
+    *,
+    queue: str | None = None,
+    url: str | None = None,
+) -> RequeueResult:
+    target_url = url or get_callback_url()
+    response: Any
+    if queue:
+        response = qstash_client.message.enqueue_json(
+            queue=queue,
+            url=target_url,
+            body=payload,
+        )
+    else:
+        response = qstash_client.message.publish_json(url=target_url, body=payload)
+    message_id = str(getattr(response, "message_id", ""))
+    if not message_id:
+        raise ValueError("QStash did not return a message id for the requeued task")
+    return RequeueResult(
+        message_id=message_id,
+        correlation_id=str(payload.get("correlation_id") or message_id),
+        parent_task_id=str(payload.get("parent_task_id") or ""),
+    )
+
+
+def build_requeue_payload(task_result: Any) -> dict[str, Any]:
+    """Build a QStash task payload from a failed TaskResult row."""
+    module, function = _split_function_path(getattr(task_result, "function_path", None))
+    parent_task_id = str(getattr(task_result, "task_id", "") or "")
+    correlation_id = str(
+        getattr(task_result, "correlation_id", "")
+        or parent_task_id
+        or getattr(task_result, "id", "")
+    )
+    attempt = int(getattr(task_result, "attempt", 0) or 0) + 1
+    return {
+        "function": function,
+        "module": module,
+        "args": getattr(task_result, "args", None) or [],
+        "kwargs": getattr(task_result, "kwargs", None) or {},
+        "task_name": getattr(task_result, "task_name", None) or f"{module}.{function}",
+        "correlation_id": correlation_id,
+        "parent_task_id": parent_task_id,
+        "attempt": attempt,
+    }
+
+
+def requeue_task_result(
+    task_result: Any,
+    *,
+    queue: str | None = None,
+    force: bool = False,
+) -> RequeueResult:
+    """Re-dispatch a failed TaskResult row as a new QStash message."""
+    status = getattr(task_result, "status", "")
+    if not force and status not in REQUEUEABLE_STATUSES:
+        raise ValueError(f"TaskResult with status {status!r} is not requeueable")
+    return _publish_payload(build_requeue_payload(task_result), queue=queue)
+
+
+def requeue_task_result_by_id(
+    identifier: str,
+    *,
+    queue: str | None = None,
+    force: bool = False,
+) -> RequeueResult:
+    """Find a TaskResult by UUID primary key or QStash task_id and requeue it."""
+    TaskResult = apps.get_model("django_qstash_results", "TaskResult")
+    query = Q(task_id=identifier)
+    try:
+        query = query | Q(id=uuid.UUID(identifier))
+    except ValueError:
+        pass
+    task_result = (
+        TaskResult.objects.filter(query).order_by("-date_done", "-date_created").first()
+    )
+    if task_result is None:
+        raise ValueError(f"No TaskResult found for {identifier!r}")
+    return requeue_task_result(task_result, queue=queue, force=force)
+
+
+def _coerce_dlq_body(body: Any) -> dict[str, Any]:
+    if isinstance(body, bytes):
+        body = body.decode()
+    if isinstance(body, str):
+        data = json.loads(body)
+    elif isinstance(body, dict):
+        data = dict(body)
+    else:
+        raise ValueError("DLQ message body is not a JSON object")
+    if not isinstance(data, dict):
+        raise ValueError("DLQ message body is not a JSON object")
+    return data
+
+
+def build_dlq_requeue_payload(message: Any) -> dict[str, Any]:
+    """Build a requeue payload from a QStash DLQ message object."""
+    payload = _coerce_dlq_body(getattr(message, "body", None))
+    parent_task_id = str(getattr(message, "message_id", "") or "")
+    correlation_id = str(payload.get("correlation_id") or parent_task_id)
+    payload["correlation_id"] = correlation_id
+    payload["parent_task_id"] = payload.get("parent_task_id") or parent_task_id
+    payload["attempt"] = int(payload.get("attempt") or 0) + 1
+    return payload
+
+
+def requeue_dlq_message(
+    dlq_id: str,
+    *,
+    delete_after_requeue: bool = False,
+    queue: str | None = None,
+) -> RequeueResult:
+    """Fetch a QStash DLQ message, re-publish its task body, and optionally delete it."""
+    message = qstash_client.dlq.get(dlq_id)
+    result = _publish_payload(
+        build_dlq_requeue_payload(message),
+        queue=queue,
+        url=getattr(message, "url", None),
+    )
+    if delete_after_requeue:
+        qstash_client.dlq.delete(dlq_id)
+    return result

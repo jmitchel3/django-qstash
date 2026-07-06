@@ -34,6 +34,7 @@ This architecture eliminates the need for long-running worker processes, making 
 | [API Reference](api-reference.md) | Detailed API documentation |
 | [Migrating from Celery](migrating-from-celery.md) | Step-by-step guide for moving a Celery codebase over |
 | [Celery Compatibility](celery-compatibility.md) | What is supported vs. what differs from Celery |
+| [Serverless Observability](observability.md) | Admin dashboard, lineage, metrics, recovery, logs, and signals |
 | [Security](security.md) | Security best practices and webhook verification |
 | [Deployment](deployment.md) | Production deployment guide |
 | [Troubleshooting](troubleshooting.md) | Common issues and solutions |

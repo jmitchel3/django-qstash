@@ -299,6 +299,22 @@ class TestAsyncResult:
         assert result.get(timeout=1) == 42
 
     @pytest.mark.django_db
+    def test_retry_row_without_lineage_is_returned(self):
+        """A RETRY row without lineage metadata cannot be resolved further."""
+        store_task_result(
+            task_id="msg-retry-only",
+            task_name="t",
+            status=TaskStatus.RETRY,
+            result={"retry_task_id": "msg-next"},
+        )
+
+        result = AsyncResult("msg-retry-only")
+
+        assert result.status == TaskStatus.RETRY
+        assert result.ready() is False
+        assert result.result == {"retry_task_id": "msg-next"}
+
+    @pytest.mark.django_db
     def test_dict_result_is_not_unwrapped(self):
         """A genuine multi-key dict result round-trips unchanged."""
         store_task_result(

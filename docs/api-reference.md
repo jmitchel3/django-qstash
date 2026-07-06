@@ -326,10 +326,11 @@ from django_qstash import shared_task
 @shared_task(bind=True)
 def process(self, order_id: int):
     print(self.request.id)  # QStash message id (task id)
-    print(self.request.retries)  # delivery attempt count from QStash
-    # self-reschedule on a transient failure:
+    print(self.request.correlation_id)  # stable root id across retries/links
+    print(self.request.retries)  # retry/delivery attempt count
+    # requeue on a transient failure:
     if not ready(order_id):
-        self.apply_async(args=(order_id,), countdown=30)
+        self.retry(countdown=30)
 ```
 
 ### `self.request` attributes
@@ -337,15 +338,18 @@ def process(self, order_id: int):
 | Attribute | Type | Description |
 |-----------|------|-------------|
 | `id` | `str` | The QStash message id (task id). A generated uuid in eager/direct execution. |
-| `retries` | `int` | Current delivery attempt count from QStash's `Upstash-Retried` header. `0` when absent or in eager mode. |
-| `correlation_id` | `str` | Correlation id for the request (the message id at the webhook; the generated id in eager mode). |
+| `retries` | `int` | Current retry/delivery attempt count. `self.retry()` increments it on the replacement message; QStash redelivery can also populate it from `Upstash-Retried`. |
+| `correlation_id` | `str` | Stable root id shared by the initial task, `self.retry()` replacement messages, and linked tasks. |
+| `root_id` | `str` | Alias for `correlation_id`. |
+| `parent_id` | `str` | Message id that scheduled this task, when any. |
+| `parent_task_id` | `str` | Alias for `parent_id`. |
 | `task_name` | `str` | The task's name. |
 | `args` | `tuple` | Positional arguments the task was called with. |
 | `kwargs` | `dict` | Keyword arguments the task was called with. |
 
 The bound `self` also delegates to the underlying task, so `self.name`,
-`self.delay(...)`, `self.apply_async(...)`, and `self.s(...)` are all available
-for self-rescheduling and chaining.
+`self.delay(...)`, `self.apply_async(...)`, `self.retry(...)`, and `self.s(...)`
+are all available for self-rescheduling and chaining.
 
 A fresh bound object is built for every call, so per-call request state is never
 shared across concurrent webhook deliveries (thread-safe by construction).
@@ -505,6 +509,10 @@ id (`task_id`) so you can read a task's status and result after the webhook has
 run. Results are **eventually consistent**: until the webhook executes the task,
 the status is `PENDING`.
 
+When a bound task calls `self.retry()`, QStash assigns a new message id. The
+original `AsyncResult` follows the stored `correlation_id` to the terminal retry
+row for the same task function.
+
 If `django_qstash.results` is not installed, the status is always `PENDING` and
 `.get()` will time out.
 
@@ -601,6 +609,10 @@ Stores task execution results. Available when `django_qstash.results` is install
 | `function_path` | `TextField` | Full Python path to the task function |
 | `args` | `JSONField` | Positional arguments passed to the task |
 | `kwargs` | `JSONField` | Keyword arguments passed to the task |
+| `correlation_id` | `CharField(255)` | Stable root id shared by retries and linked tasks |
+| `parent_task_id` | `CharField(255)` | Message id that scheduled this task, when any |
+| `attempt` | `PositiveIntegerField` | Retry attempt number for this task lifecycle |
+| `duration_ms` | `PositiveIntegerField` | Execution duration in milliseconds (nullable) |
 
 #### Example Queries
 
@@ -624,6 +636,9 @@ from django.utils import timezone
 from datetime import timedelta
 
 recent = TaskResult.objects.filter(date_done__gte=timezone.now() - timedelta(hours=24))
+
+# Inspect a whole retry/link lifecycle
+lineage = TaskResult.objects.filter(correlation_id="msg_root").order_by("attempt")
 ```
 
 ---
