@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from unittest import mock
 
 from django.test import override_settings
@@ -39,6 +40,24 @@ def test_setting_overrides_debug_to_skip_clear():
     with mock.patch.object(utils._discover_tasks_impl, "cache_clear") as cache_clear:
         clear_discover_tasks_cache(sender=None)
         cache_clear.assert_not_called()
+
+
+@override_settings(DEBUG=True)
+def test_signal_handler_logs_cache_clear_at_debug_level(caplog):
+    """Per-request cache clearing must not flood normal INFO logs."""
+    caplog.set_level(logging.DEBUG, logger="django_qstash.discovery.utils")
+
+    with mock.patch.object(utils._discover_tasks_impl, "cache_clear"):
+        clear_discover_tasks_cache(sender=None)
+
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "django_qstash.discovery.utils"
+        and record.message == "Clearing Django QStash discovered tasks cache"
+    ]
+    assert len(records) == 1
+    assert records[0].levelno == logging.DEBUG
 
 
 def test_explicit_cache_clear_still_works():

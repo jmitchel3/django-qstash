@@ -127,7 +127,7 @@ def clear_discover_tasks_cache(sender: type[Any] | None, **kwargs: Any) -> None:
     )
     if not should_clear:
         return
-    logger.info("Clearing Django QStash discovered tasks cache")
+    logger.debug("Clearing Django QStash discovered tasks cache")
     _discover_tasks_impl.cache_clear()
 
 
