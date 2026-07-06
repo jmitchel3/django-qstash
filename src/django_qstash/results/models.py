@@ -26,10 +26,24 @@ class TaskResult(models.Model):
     function_path = models.TextField(blank=True, null=True)
     args = models.JSONField(null=True)
     kwargs = models.JSONField(null=True)
+    correlation_id = models.CharField(
+        max_length=255, blank=True, default="", db_index=True
+    )
+    parent_task_id = models.CharField(
+        max_length=255, blank=True, default="", db_index=True
+    )
+    attempt = models.PositiveIntegerField(default=0)
+    duration_ms = models.PositiveIntegerField(blank=True, null=True)
 
     class Meta:
         app_label = "django_qstash_results"
-        ordering = ["-date_done"]
+        ordering = ["-date_done", "-date_created"]
 
     def __str__(self) -> str:
         return f"{self.task_name} ({self.task_id})"
+
+    @property
+    def duration_seconds(self) -> float | None:
+        if self.duration_ms is None:
+            return None
+        return self.duration_ms / 1000

@@ -25,6 +25,26 @@ class TaskError(WebhookError):
     pass
 
 
+class TaskRetry(WebhookError):
+    """Raised internally when ``self.retry()`` schedules a replacement message."""
+
+    def __init__(
+        self,
+        message_id: str,
+        exc: BaseException | None = None,
+    ) -> None:
+        self.message_id = message_id
+        self.original_exception = exc
+        if exc is None:
+            self._message = f"Task retry scheduled as {message_id}"
+        else:
+            self._message = f"Task retry scheduled as {message_id}: {exc}"
+        super().__init__(message_id, exc)
+
+    def __str__(self) -> str:
+        return self._message
+
+
 class TaskResultError(Exception):
     """Raised when an AsyncResult is resolved for a task that did not succeed.
 

@@ -26,6 +26,8 @@ from . import utils
 from .exceptions import PayloadError
 from .exceptions import SignatureError
 from .exceptions import TaskError
+from .exceptions import TaskRetry
+from .results.services import duration_to_ms
 from .results.services import store_task_result
 from .results.services import successful_result_exists
 
@@ -52,6 +54,9 @@ class TaskPayload:
     kwargs: dict[str, Any]
     task_name: str
     function_path: str
+    correlation_id: str = ""
+    parent_task_id: str = ""
+    attempt: int = 0
     on_success: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
@@ -69,6 +74,9 @@ class TaskPayload:
             kwargs=data["kwargs"],
             task_name=data.get("task_name", function_path),
             function_path=function_path,
+            correlation_id=data.get("correlation_id") or "",
+            parent_task_id=data.get("parent_task_id") or "",
+            attempt=int(data.get("attempt") or 0),
             on_success=data.get("on_success") or [],
         )
 
@@ -80,6 +88,7 @@ class QStashWebhook:
             next_signing_key=settings.QSTASH_NEXT_SIGNING_KEY,
         )
         self.force_https = getattr(settings, "DJANGO_QSTASH_FORCE_HTTPS", True)
+        self._last_duration_ms: int | None = None
 
     def _ensure_https(self, url: str) -> str:
         """
@@ -157,6 +166,7 @@ class QStashWebhook:
             raise TaskError(f"Could not import task function: {e}")
 
         current_correlation_id = correlation_id.get("")
+        self._last_duration_ms = None
 
         # Build log extra with optional args/kwargs
         log_extra: dict[str, Any] = {
@@ -185,6 +195,7 @@ class QStashWebhook:
                     id=request_id,
                     retries=retries,
                     correlation_id=current_correlation_id,
+                    parent_task_id=getattr(payload, "parent_task_id", ""),
                     task_name=payload.task_name,
                     args=tuple(payload.args),
                     kwargs=payload.kwargs,
@@ -198,6 +209,7 @@ class QStashWebhook:
                 result = task_func(*payload.args, **payload.kwargs)
 
             duration = time.perf_counter() - start_time
+            self._last_duration_ms = duration_to_ms(duration)
             logger.info(
                 "task_completed",
                 extra={
@@ -218,8 +230,23 @@ class QStashWebhook:
 
             return result
 
+        except TaskRetry as e:
+            duration = time.perf_counter() - start_time
+            self._last_duration_ms = duration_to_ms(duration)
+            logger.info(
+                "task_retry_scheduled",
+                extra={
+                    **log_extra,
+                    "duration_seconds": round(duration, 4),
+                    "status": "retry",
+                    "retry_task_id": e.message_id,
+                },
+            )
+            raise
+
         except Exception as e:
             duration = time.perf_counter() - start_time
+            self._last_duration_ms = duration_to_ms(duration)
             logger.exception(
                 "task_failed",
                 extra={
@@ -265,6 +292,10 @@ class QStashWebhook:
             args=payload.args,
             kwargs=payload.kwargs,
             function_path=payload.function_path,
+            correlation_id=getattr(payload, "correlation_id", "") or task_id or "",
+            parent_task_id=getattr(payload, "parent_task_id", ""),
+            attempt=getattr(payload, "attempt", 0),
+            duration_ms=self._last_duration_ms,
         )
 
     def _error_payload(
@@ -284,6 +315,17 @@ class QStashWebhook:
         if value is None:
             return 0
         return int(value)
+
+    def _prepare_lineage(
+        self,
+        payload: TaskPayload,
+        *,
+        task_id: str | None,
+        retries: int,
+    ) -> None:
+        """Fill root correlation id and attempt metadata from payload/headers."""
+        payload.correlation_id = payload.correlation_id or task_id or ""
+        payload.attempt = max(payload.attempt, retries)
 
     def _get_client_ip(self, request: HttpRequest) -> str:
         """Extract client IP from request headers."""
@@ -322,6 +364,10 @@ class QStashWebhook:
             )
 
             payload = self.parse_payload(body)
+            retries = self._retries_from_headers(request.headers)
+            self._prepare_lineage(payload, task_id=task_id, retries=retries)
+            if payload.correlation_id:
+                correlation_id.set(payload.correlation_id)
 
             # Audit log the webhook request
             audit_logger.info(
@@ -367,7 +413,7 @@ class QStashWebhook:
             result = self.execute_task(
                 payload,
                 request_id=task_id or "",
-                retries=self._retries_from_headers(request.headers),
+                retries=payload.attempt,
             )
             self._store_result(
                 payload=payload,
@@ -380,13 +426,37 @@ class QStashWebhook:
             # success-linked signatures. enqueue_links validates each link
             # against the allowlist and skips/logs failures, so a chaining
             # problem never affects this task's 200 response.
-            enqueue_links(payload.on_success)
+            enqueue_links(
+                payload.on_success,
+                correlation_id=payload.correlation_id,
+                parent_task_id=task_id or "",
+            )
 
             return {
                 "status": "success",
                 "task_name": payload.task_name,
                 # Serialize None as a real JSON null rather than the string "null".
                 "result": result,
+            }, 200
+
+        except TaskRetry as e:
+            logger.info("Task retry scheduled: %s", str(e))
+            parsed_payload = cast(TaskPayload, payload)
+            self._store_result(
+                payload=parsed_payload,
+                task_id=task_id,
+                status=TaskStatus.RETRY,
+                result={
+                    "retry_task_id": e.message_id,
+                    "reason": (
+                        str(e.original_exception) if e.original_exception else None
+                    ),
+                },
+            )
+            return {
+                "status": "retry",
+                "task_name": parsed_payload.task_name,
+                "retry_task_id": e.message_id,
             }, 200
 
         except SignatureError as e:

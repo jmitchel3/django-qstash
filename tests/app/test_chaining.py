@@ -139,6 +139,32 @@ class TestEnqueueLinks:
             enqueue_links([sig.to_dict()])
         mock_task.apply_async.assert_called_once_with(args=("z",), kwargs={})
 
+    def test_registered_link_gets_lineage_metadata(self):
+        """A registered link inherits the parent correlation and task id."""
+        sig = second_task.s("z")
+        mock_task = Mock()
+        with (
+            patch(
+                "django_qstash.app.base.discover_tasks",
+                return_value=[sig.function_path],
+            ),
+            patch(
+                "django_qstash.app.base.import_string",
+                return_value=mock_task,
+            ),
+        ):
+            enqueue_links(
+                [sig.to_dict()],
+                correlation_id="root-1",
+                parent_task_id="parent-1",
+            )
+        mock_task.apply_async.assert_called_once_with(
+            args=("z",),
+            kwargs={},
+            _qstash_correlation_id="root-1",
+            _qstash_parent_task_id="parent-1",
+        )
+
     def test_unregistered_link_skipped(self):
         """A link that is not in the allowlist is skipped, not enqueued."""
         sig = second_task.s("z")

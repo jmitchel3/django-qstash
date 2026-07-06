@@ -135,6 +135,33 @@
             color: #6c757d;
             font-style: italic;
         }
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(120px, 1fr));
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+        .metric {
+            background: white;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            padding: 12px;
+        }
+        .metric-label {
+            color: #6c757d;
+            font-size: 13px;
+            margin-bottom: 4px;
+        }
+        .metric-value {
+            color: #212529;
+            font-size: 22px;
+            font-weight: 600;
+        }
+        .mono {
+            font-family: monospace;
+            font-size: 13px;
+            word-break: break-all;
+        }
     </style>
 </head>
 <body>
@@ -146,36 +173,67 @@
         </div>
     </div>
 
+    <div class="metrics">
+        <div class="metric">
+            <div class="metric-label">Tasks</div>
+            <div class="metric-value">{{ metrics.total }}</div>
+        </div>
+        <div class="metric">
+            <div class="metric-label">Success Rate</div>
+            <div class="metric-value">{{ metrics.success_rate|floatformat:2 }}</div>
+        </div>
+        <div class="metric">
+            <div class="metric-label">p50 Duration</div>
+            <div class="metric-value">{{ metrics.duration_ms.p50|default:"-" }} ms</div>
+        </div>
+        <div class="metric">
+            <div class="metric-label">p95 Duration</div>
+            <div class="metric-value">{{ metrics.duration_ms.p95|default:"-" }} ms</div>
+        </div>
+    </div>
+
     <table>
         <tr>
+            <th>Task</th>
             <th>Task ID</th>
+            <th>Correlation</th>
+            <th>Attempt</th>
             <th>Status</th>
+            <th>Duration</th>
             <th>Result</th>
             <th>Date Done</th>
         </tr>
         {% for task in tasks %}
         <tr>
+            <td>{{ task.task_name }}</td>
             <td class="task-id">{{ task.task_id }}</td>
+            <td class="mono">{{ task.correlation_id|default:"-" }}</td>
+            <td>{{ task.attempt }}</td>
             <td>
-                <span class="status {% if task.status == 'SUCCESS' %}success{% elif task.status == 'FAILURE' %}error{% endif %}">
+                <span class="status {% if task.status == 'SUCCESS' %}success{% elif task.status != 'PENDING' %}error{% endif %}">
                     {{ task.status }}
                 </span>
             </td>
+            <td>{% if task.duration_ms %}{{ task.duration_ms }} ms{% else %}-{% endif %}</td>
             <td>
                 <div class="result">
+                    {% if task.result %}
                     {% for key, value in task.result.items %}
                         <div class="result-row">
                             <span class="result-label">{{ key|title }}:</span>
                             <span class="result-value">{{ value }}</span>
                         </div>
                     {% endfor %}
+                    {% else %}
+                        -
+                    {% endif %}
                 </div>
             </td>
             <td class="date">{{ task.date_done|date:"M j, Y, g:i a" }}</td>
         </tr>
         {% empty %}
         <tr>
-            <td colspan="4" class="empty-message">No tasks found in the last 24 hours.</td>
+            <td colspan="8" class="empty-message">No tasks found in the last 24 hours.</td>
         </tr>
         {% endfor %}
     </table>

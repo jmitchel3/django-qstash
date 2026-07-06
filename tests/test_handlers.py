@@ -12,8 +12,10 @@ from django_qstash.db.models import TaskStatus
 from django_qstash.exceptions import PayloadError
 from django_qstash.exceptions import SignatureError
 from django_qstash.exceptions import TaskError
+from django_qstash.exceptions import TaskRetry
 from django_qstash.handlers import QStashWebhook
 from django_qstash.handlers import TaskPayload
+from django_qstash.handlers import correlation_id
 
 # Add pytest mark for database access
 pytestmark = pytest.mark.django_db
@@ -35,6 +37,9 @@ class TestTaskPayload:
         assert payload.kwargs == {"key": "value"}
         assert payload.task_name == "test_module.test_func"
         assert payload.function_path == "test_module.test_func"
+        assert payload.correlation_id == ""
+        assert payload.parent_task_id == ""
+        assert payload.attempt == 0
         # Absent on_success defaults to an empty list.
         assert payload.on_success == []
 
@@ -49,6 +54,21 @@ class TestTaskPayload:
         }
         payload = TaskPayload.from_dict(data)
         assert payload.on_success[0]["function"] == "f"
+
+    def test_from_dict_with_lineage(self):
+        data = {
+            "function": "test_func",
+            "module": "test_module",
+            "args": [],
+            "kwargs": {},
+            "correlation_id": "root-1",
+            "parent_task_id": "parent-1",
+            "attempt": 2,
+        }
+        payload = TaskPayload.from_dict(data)
+        assert payload.correlation_id == "root-1"
+        assert payload.parent_task_id == "parent-1"
+        assert payload.attempt == 2
 
     def test_from_dict_invalid(self):
         data = {"invalid": "data"}
@@ -237,6 +257,28 @@ class TestQStashWebhook:
 
         assert result == "plain result"
 
+    def test_execute_task_reraises_task_retry(self, webhook):
+        """execute_task logs retry scheduling but lets handle_request persist it."""
+
+        def retrying():
+            raise TaskRetry("retry-msg")
+
+        payload = Mock(
+            function_path="test.path",
+            args=[],
+            kwargs={},
+            task_name="test.path",
+        )
+        with (
+            patch(
+                "django_qstash.handlers.discover_tasks",
+                return_value=["test.path"],
+            ),
+            patch("django_qstash.handlers.utils.import_string", return_value=retrying),
+        ):
+            with pytest.raises(TaskRetry, match="retry-msg"):
+                webhook.execute_task(payload)
+
     def test_retries_from_headers_present(self, webhook):
         """The Upstash-Retried header is parsed as the delivery retry count."""
         assert webhook._retries_from_headers({"Upstash-Retried": "4"}) == 4
@@ -293,7 +335,104 @@ class TestQStashWebhook:
             response, status = webhook.handle_request(request)
 
         assert status == 200
-        mock_enqueue.assert_called_once_with(links)
+        mock_enqueue.assert_called_once_with(
+            links,
+            correlation_id="123",
+            parent_task_id="123",
+        )
+
+    def test_handle_request_preserves_payload_correlation_for_links(self, webhook):
+        """Linked tasks keep the original root id and use the current message as parent."""
+        links = [{"function": "f", "module": "m", "args": [], "kwargs": {}}]
+        request = Mock(spec=HttpRequest)
+        request.body = json.dumps(
+            {
+                "function": "test_func",
+                "module": "test_module",
+                "args": [],
+                "kwargs": {},
+                "correlation_id": "root-1",
+                "parent_task_id": "prior-msg",
+                "attempt": 3,
+                "on_success": links,
+            }
+        ).encode()
+        request.headers = {"Upstash-Signature": "valid", "Upstash-Message-Id": "child"}
+        request.META = {"REMOTE_ADDR": "127.0.0.1"}
+        request.build_absolute_uri.return_value = "https://example.com"
+
+        with (
+            patch.object(webhook, "verify_signature"),
+            patch.object(webhook, "execute_task", return_value="ok") as mock_execute,
+            patch("django_qstash.handlers.enqueue_links") as mock_enqueue,
+        ):
+            response, status = webhook.handle_request(request)
+
+        assert status == 200
+        assert response["status"] == "success"
+        assert mock_execute.call_args.kwargs["retries"] == 3
+        mock_enqueue.assert_called_once_with(
+            links,
+            correlation_id="root-1",
+            parent_task_id="child",
+        )
+
+    def test_handle_request_without_message_id_leaves_empty_correlation(self, webhook):
+        """Requests with no message id and no payload root skip correlation reset."""
+        correlation_id.set("")
+        request = Mock(spec=HttpRequest)
+        request.body = json.dumps(
+            {"function": "test_func", "module": "test_module", "args": [], "kwargs": {}}
+        ).encode()
+        request.headers = {"Upstash-Signature": "valid"}
+        request.META = {"REMOTE_ADDR": "127.0.0.1"}
+        request.build_absolute_uri.return_value = "https://example.com"
+
+        with (
+            patch.object(webhook, "verify_signature"),
+            patch.object(webhook, "execute_task", return_value="ok"),
+        ):
+            response, status = webhook.handle_request(request)
+
+        assert status == 200
+        assert response["status"] == "success"
+        assert correlation_id.get("") == ""
+
+    def test_handle_request_task_retry_stores_retry_result(self, webhook):
+        request = Mock(spec=HttpRequest)
+        request.body = json.dumps(
+            {"function": "test_func", "module": "test_module", "args": [], "kwargs": {}}
+        ).encode()
+        request.headers = {
+            "Upstash-Signature": "valid",
+            "Upstash-Message-Id": "msg-r",
+        }
+        request.META = {"REMOTE_ADDR": "127.0.0.1"}
+        request.build_absolute_uri.return_value = "https://example.com"
+
+        with (
+            patch.object(webhook, "verify_signature"),
+            patch.object(
+                webhook,
+                "execute_task",
+                side_effect=TaskRetry("retry-msg", ValueError("try again")),
+            ),
+            patch("django_qstash.handlers.store_task_result") as mock_store,
+        ):
+            response, status = webhook.handle_request(request)
+
+        assert status == 200
+        assert response == {
+            "status": "retry",
+            "task_name": "test_module.test_func",
+            "retry_task_id": "retry-msg",
+        }
+        assert mock_store.call_args.kwargs["status"] == TaskStatus.RETRY
+        assert mock_store.call_args.kwargs["correlation_id"] == "msg-r"
+        assert mock_store.call_args.kwargs["result"] == {
+            "retry_task_id": "retry-msg",
+            "reason": "try again",
+        }
 
     def test_handle_request_unexpected_error_stores_result(self, webhook):
         """An unexpected error after the payload is parsed stores an INTERNAL_ERROR."""

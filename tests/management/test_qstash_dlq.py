@@ -100,6 +100,22 @@ def test_delete_dlq_message(mock_client, capsys):
     assert "Deleted DLQ message dlq-123" in captured.out
 
 
+@patch("django_qstash.management.commands.qstash_dlq.requeue_dlq_message")
+def test_requeue_dlq_message(mock_requeue, capsys):
+    result = Mock()
+    result.message_id = "msg-new"
+    mock_requeue.return_value = result
+
+    call_command("qstash_dlq", "--requeue", "dlq-123", "--delete-after-requeue")
+
+    mock_requeue.assert_called_once_with(
+        "dlq-123",
+        delete_after_requeue=True,
+    )
+    captured = capsys.readouterr()
+    assert "Requeued DLQ message dlq-123 as msg-new" in captured.out
+
+
 @patch("django_qstash.management.commands.qstash_dlq.qstash_client")
 def test_delete_many_dlq_messages(mock_client, capsys):
     mock_client.dlq.delete_many.return_value = 2
@@ -115,7 +131,10 @@ def test_qstash_dlq_no_options(capsys):
     call_command("qstash_dlq")
 
     captured = capsys.readouterr()
-    assert "Please specify --list, --get, --delete, or --delete-many" in captured.out
+    assert (
+        "Please specify --list, --get, --delete, --requeue, or --delete-many"
+        in captured.out
+    )
 
 
 def test_display_empty_values_render_dash():

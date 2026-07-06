@@ -33,6 +33,7 @@ out the cases where the QStash delivery model changes the semantics.
 | Eager result object | `EagerResult` | `EagerResult` | Returned by `.apply()` and by eager `.delay()` / `.apply_async()`. Holds the value (or exception) in memory, so `status`, `result`, and `get()` resolve immediately with no database round-trip and the exact value type is preserved. See [API reference](api-reference.md#eagerresult). |
 | Queues (FIFO) | `apply_async(queue="...")` | `apply_async(queue="...")` | Routes through a QStash queue for ordered (FIFO) delivery instead of a direct publish. |
 | Retries | `max_retries` / `retries` | `max_retries` / `retries` | Set on the decorator (`@shared_task(max_retries=5)`) or per call. QStash performs the retries based on the webhook HTTP response; `max_retries` maps to the QStash `retries` option. |
+| In-task retry | `self.retry()` | `self.retry()` for `bind=True` tasks | Re-enqueues the same task as a new QStash message, stores the current attempt as `RETRY`, preserves the root `correlation_id`, sets `parent_task_id`, and increments `attempt`. |
 | Deduplication | (no direct equivalent) | `deduplicated=True` / `content_based_deduplication` | Enables QStash content-based deduplication so the same payload is not enqueued twice. Set on the decorator or per call. |
 | Success callback | `link=` (callback) | `callback` / `callback_headers` | Maps to QStash's per-message callback URL and headers. |
 | Failure callback | `link_error=` | `failure_callback` / `failure_callback_headers` | QStash calls this URL after retries are exhausted. |
@@ -42,6 +43,7 @@ out the cases where the QStash delivery model changes the semantics.
 | Result backend | `result_backend` | `django_qstash.results` app | Optional `TaskResult` model persists status, return value, traceback, args, and kwargs. Required for `AsyncResult` lookups to resolve. See [API reference](api-reference.md#taskresult-model). |
 | `bind=True` / `self.request` | `@shared_task(bind=True)` | `@shared_task(bind=True)` | Passes a bound `self` whose `self.request` exposes `id`, `retries`, `correlation_id`, `task_name`, `args`, and `kwargs`. See [API reference](api-reference.md) for details. |
 | Sequential chaining | `chain` / `link=` | `apply_async(..., link=other_task.s(...))` | Enqueues `other_task` after the task succeeds (sequential chain only; no `group` / `chord`). See [API reference](api-reference.md) for details. |
+| Task events / monitoring | Flower, task events | Supported (admin + metrics + logs) | No Flower process is required. Use the `TaskResult` admin dashboard, `qstash_metrics`, `qstash_requeue`, structured logs, Django signals, and `qstash_dlq`. See [Serverless Observability](observability.md). |
 
 ### Message options
 
@@ -85,6 +87,10 @@ Celery user should know about.
   delivery, which is about ordering rather than per-message scheduling. Reach for
   `countdown` / `eta` on a direct (non-queued) publish when you need delayed
   delivery.
+- **Monitoring is pull/log based.** django-qstash does not run a real-time event
+  stream. The admin and metrics command read `TaskResult`; structured logs and
+  signals are emitted during webhook execution and can be shipped to your log
+  platform.
 
 ## Not yet supported
 
@@ -94,11 +100,9 @@ scope for a broker-free, worker-free design.
 | Feature | Celery | Status in django-qstash |
 |---------|--------|-------------------------|
 | Full canvas | `group`, `chord`, multi-step `chain` | Not supported. Only the sequential "run B after A succeeds" case is available via `link=`. Parallel groups and chords have no QStash primitive here. |
-| In-task retry | `self.retry()` | Not supported. Retries are driven by QStash based on the webhook HTTP response, not by re-raising from inside the task. |
 | Per-task rate limits | `rate_limit` | Not supported as a Celery-style decorator option. QStash `flow_control` covers rate/period at the message level instead. |
 | Soft/hard time limits | `soft_time_limit`, `time_limit` | Not supported. The closest control is the QStash `timeout` message option, which bounds the webhook request, not in-process soft/hard limits with `SoftTimeLimitExceeded`. |
 | Custom result backends | `result_backend` (Redis, DB, RPC, ...) | Not supported. Results are stored only via the `django_qstash.results` app (the `TaskResult` model in your Django database). |
-| Task events / monitoring | Flower, task events | Not supported. There is no event stream or Flower integration. Inspect the `TaskResult` table, the Django admin, structured logs, and the QStash DLQ command instead. |
 
 ## See also
 

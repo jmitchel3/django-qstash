@@ -8,6 +8,7 @@ from django.core.management.base import CommandParser
 from qstash.dlq import DlqFilter
 
 from django_qstash.client import qstash_client
+from django_qstash.results.services import requeue_dlq_message
 
 
 def _compact_filter(options: dict[str, Any]) -> dict[str, Any] | None:
@@ -50,6 +51,12 @@ class Command(BaseCommand):
         parser.add_argument("--list", action="store_true", help="List DLQ messages")
         parser.add_argument("--get", help="Fetch one DLQ message by DLQ ID")
         parser.add_argument("--delete", help="Delete one DLQ message by DLQ ID")
+        parser.add_argument("--requeue", help="Requeue one DLQ message by DLQ ID")
+        parser.add_argument(
+            "--delete-after-requeue",
+            action="store_true",
+            help="Delete the DLQ message after --requeue succeeds",
+        )
         parser.add_argument(
             "--delete-many",
             nargs="+",
@@ -113,6 +120,19 @@ class Command(BaseCommand):
                 )
                 return
 
+            if options.get("requeue"):
+                result = requeue_dlq_message(
+                    options["requeue"],
+                    delete_after_requeue=options["delete_after_requeue"],
+                )
+                self.stdout.write(
+                    self.style.SUCCESS(
+                        f"Requeued DLQ message {options['requeue']} as "
+                        f"{result.message_id}"
+                    )
+                )
+                return
+
             if options.get("delete_many"):
                 deleted = qstash_client.dlq.delete_many(options["delete_many"])
                 self.stdout.write(self.style.SUCCESS(f"Deleted {deleted} DLQ messages"))
@@ -120,7 +140,7 @@ class Command(BaseCommand):
 
             self.stdout.write(
                 self.style.ERROR(
-                    "Please specify --list, --get, --delete, or --delete-many"
+                    "Please specify --list, --get, --delete, --requeue, or --delete-many"
                 )
             )
         except Exception as e:

@@ -12,6 +12,7 @@ from datetime import timezone
 from functools import partial
 from typing import Any
 from typing import Generic
+from typing import NoReturn
 from typing import TypeVar
 from typing import cast
 from typing import overload
@@ -25,6 +26,7 @@ from django_qstash.client import qstash_client
 from django_qstash.db.models import TaskStatus
 from django_qstash.discovery.utils import discover_tasks
 from django_qstash.exceptions import TaskResultError
+from django_qstash.exceptions import TaskRetry
 from django_qstash.exceptions import TaskTimeoutError
 from django_qstash.settings import qstash_settings
 from django_qstash.utils import import_string
@@ -143,6 +145,7 @@ class TaskRequest:
         id: str,
         retries: int = 0,
         correlation_id: str = "",
+        parent_task_id: str = "",
         task_name: str = "",
         args: tuple[Any, ...] = (),
         kwargs: dict[str, Any] | None = None,
@@ -150,6 +153,9 @@ class TaskRequest:
         self.id = id
         self.retries = retries
         self.correlation_id = correlation_id
+        self.root_id = correlation_id
+        self.parent_id = parent_task_id
+        self.parent_task_id = parent_task_id
         self.task_name = task_name
         self.args = args
         self.kwargs = kwargs if kwargs is not None else {}
@@ -173,6 +179,30 @@ class BoundTask:
         # Only reached for attributes not set on the proxy itself
         # (i.e. everything except ``_task`` and ``request``).
         return getattr(self._task, name)
+
+    def retry(
+        self,
+        exc: BaseException | None = None,
+        args: tuple[Any, ...] | None = None,
+        kwargs: dict[str, Any] | None = None,
+        countdown: int | None = None,
+        eta: datetime | int | float | None = None,
+        **options: Any,
+    ) -> NoReturn:
+        """Requeue the current task and stop the current execution."""
+        retry_args = self.request.args if args is None else args
+        retry_kwargs = self.request.kwargs if kwargs is None else kwargs
+        result = self._task._enqueue(
+            args=retry_args,
+            kwargs=retry_kwargs,
+            countdown=countdown,
+            eta=eta,
+            correlation_id=self.request.correlation_id or self.request.id,
+            parent_task_id=self.request.id,
+            attempt=self.request.retries + 1,
+            **options,
+        )
+        raise TaskRetry(result.task_id, exc=exc)
 
 
 class Signature:
@@ -226,7 +256,12 @@ def _normalize_links(
     return list(link)
 
 
-def enqueue_links(links: list[dict[str, Any]]) -> None:
+def enqueue_links(
+    links: list[dict[str, Any]],
+    *,
+    correlation_id: str = "",
+    parent_task_id: str = "",
+) -> None:
     """Resolve and enqueue serialized success-link signatures.
 
     Each link is validated against the registered-task allowlist
@@ -253,10 +288,15 @@ def enqueue_links(links: list[dict[str, Any]]) -> None:
         try:
             task = import_string(function_path)
             options = dict(link.get("options") or {})
+            apply_options = dict(options)
+            if correlation_id:
+                apply_options["_qstash_correlation_id"] = correlation_id
+            if parent_task_id:
+                apply_options["_qstash_parent_task_id"] = parent_task_id
             task.apply_async(
                 args=tuple(link.get("args") or ()),
                 kwargs=dict(link.get("kwargs") or {}),
-                **options,
+                **apply_options,
             )
         except Exception as exc:
             logger.warning("Failed to enqueue linked task %s: %s", function_path, exc)
@@ -356,14 +396,22 @@ class QStashTask(Generic[R]):
         return self._run(*args, **kwargs)
 
     def _eager_request(
-        self, args: tuple[Any, ...], kwargs: dict[str, Any]
+        self,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *,
+        correlation_id: str = "",
+        parent_task_id: str = "",
+        attempt: int = 0,
     ) -> TaskRequest:
         """Build a request for inline execution (direct call / eager / apply)."""
         task_id = str(uuid.uuid4())
+        root_id = correlation_id or task_id
         return TaskRequest(
             id=task_id,
-            retries=0,
-            correlation_id=task_id,
+            retries=attempt,
+            correlation_id=root_id,
+            parent_task_id=parent_task_id,
             task_name=self.name or "",
             args=tuple(args),
             kwargs=dict(kwargs),
@@ -445,6 +493,9 @@ class QStashTask(Generic[R]):
         countdown: int | None = None,
         eta: datetime | int | float | None = None,
         link: Signature | list[Signature] | None = None,
+        correlation_id: str = "",
+        parent_task_id: str = "",
+        attempt: int = 0,
         **options: Any,
     ) -> AsyncResult:
         if self.func is None:
@@ -458,6 +509,12 @@ class QStashTask(Generic[R]):
             "task_name": self.name,
             "options": self.options,
         }
+        if correlation_id:
+            payload["correlation_id"] = correlation_id
+        if parent_task_id:
+            payload["parent_task_id"] = parent_task_id
+        if attempt:
+            payload["attempt"] = attempt
 
         links = _normalize_links(link)
         if links:
@@ -482,7 +539,7 @@ class QStashTask(Generic[R]):
             response = enqueue(queue=queue, url=url, body=payload, **send_options)
 
         # Return an AsyncResult-like object for Celery compatibility
-        return AsyncResult(response.message_id)
+        return AsyncResult(response.message_id, correlation_id=correlation_id)
 
     def delay(self, *args: Any, **kwargs: Any) -> AsyncResult:
         """Celery-compatible delay() method.
@@ -501,6 +558,9 @@ class QStashTask(Generic[R]):
         countdown: int | None = None,
         eta: datetime | int | float | None = None,
         link: Signature | list[Signature] | None = None,
+        _qstash_correlation_id: str = "",
+        _qstash_parent_task_id: str = "",
+        _qstash_attempt: int = 0,
         **options: Any,
     ) -> AsyncResult:
         """Celery-compatible apply_async() method.
@@ -515,13 +575,23 @@ class QStashTask(Generic[R]):
         args = args or ()
         kwargs = kwargs or {}
         if qstash_settings.DJANGO_QSTASH_ALWAYS_EAGER:
-            return self.apply(args=args, kwargs=kwargs, link=link)
+            return self.apply(
+                args=args,
+                kwargs=kwargs,
+                link=link,
+                _qstash_correlation_id=_qstash_correlation_id,
+                _qstash_parent_task_id=_qstash_parent_task_id,
+                _qstash_attempt=_qstash_attempt,
+            )
         return self._enqueue(
             args=args,
             kwargs=kwargs,
             countdown=countdown,
             eta=eta,
             link=link,
+            correlation_id=_qstash_correlation_id,
+            parent_task_id=_qstash_parent_task_id,
+            attempt=_qstash_attempt,
             **options,
         )
 
@@ -530,6 +600,9 @@ class QStashTask(Generic[R]):
         args: tuple[Any, ...] | None = None,
         kwargs: dict[str, Any] | None = None,
         link: Signature | list[Signature] | None = None,
+        _qstash_correlation_id: str = "",
+        _qstash_parent_task_id: str = "",
+        _qstash_attempt: int = 0,
         **options: Any,
     ) -> EagerResult:
         """Execute the task synchronously and return an :class:`EagerResult`.
@@ -550,9 +623,24 @@ class QStashTask(Generic[R]):
         """
         args = args or ()
         kwargs = kwargs or {}
-        request = self._eager_request(args, kwargs)
+        request = self._eager_request(
+            args,
+            kwargs,
+            correlation_id=_qstash_correlation_id,
+            parent_task_id=_qstash_parent_task_id,
+            attempt=_qstash_attempt,
+        )
         try:
             value = self.run_with_context(request, *args, **kwargs)
+        except TaskRetry as exc:
+            return EagerResult(
+                request.id,
+                {"retry_task_id": exc.message_id},
+                TaskStatus.RETRY,
+                traceback=(
+                    str(exc.original_exception) if exc.original_exception else None
+                ),
+            )
         except Exception as exc:
             return EagerResult(
                 request.id,
@@ -560,7 +648,11 @@ class QStashTask(Generic[R]):
                 TaskStatus.EXECUTION_ERROR,
                 traceback=traceback_module.format_exc(),
             )
-        enqueue_links([sig.to_dict() for sig in _normalize_links(link)])
+        enqueue_links(
+            [sig.to_dict() for sig in _normalize_links(link)],
+            correlation_id=request.correlation_id,
+            parent_task_id=request.id,
+        )
         return EagerResult(request.id, value, TaskStatus.SUCCESS)
 
 
@@ -575,8 +667,9 @@ class AsyncResult:
     resolves to ``PENDING`` and ``get()`` will time out.
     """
 
-    def __init__(self, task_id: str):
+    def __init__(self, task_id: str, *, correlation_id: str = ""):
         self.task_id = task_id
+        self.correlation_id = correlation_id
 
     @property
     def id(self) -> str:
@@ -588,11 +681,30 @@ class AsyncResult:
             TaskResult = apps.get_model("django_qstash_results", "TaskResult")
         except LookupError:
             return None
-        return (
+        row = (
             TaskResult.objects.filter(task_id=self.task_id)
             .order_by("-date_done", "-date_created")
             .first()
         )
+        if row is None:
+            return None
+        if row.status != TaskStatus.RETRY:
+            return row
+
+        lineage_id = getattr(row, "correlation_id", "") or self.correlation_id
+        function_path = getattr(row, "function_path", None)
+        if not lineage_id or not function_path:
+            return row
+        terminal = (
+            TaskResult.objects.filter(
+                correlation_id=lineage_id,
+                function_path=function_path,
+                status__in=TERMINAL_STATUSES,
+            )
+            .order_by("-attempt", "-date_done", "-date_created")
+            .first()
+        )
+        return terminal or row
 
     @property
     def status(self) -> str:
