@@ -412,8 +412,8 @@ python manage.py available_tasks --locations
 # List schedules from QStash
 python manage.py task_schedules --list
 
-# Sync schedules to local database
-python manage.py task_schedules --sync
+# Import schedules for this callback URL into the local database (no QStash writes)
+python manage.py task_schedules --sync --no-input
 ```
 
 ### Check Task Results

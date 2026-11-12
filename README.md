@@ -327,8 +327,8 @@ The `.delay()` method does not support a countdown parameter because it simply p
 - `python manage.py available_tasks` to view all available tasks found by django-qstash. Unlike Celery, django-qstash does not assign tasks to a specific Celery app (e.g. `app = Celery()`).
 
 _Requires `django_qstash.schedules` installed._
-- `python manage.py task_schedules --list` see all schedules relate to the `DJANGO_QSTASH_DOMAIN`
-- `python manage.py task_schedules --sync` sync schedules based on the `DJANGO_QSTASH_DOMAIN` to store in the Django Admin.
+- `python manage.py task_schedules --list` lists schedules whose destination is this app's callback URL (read-only)
+- `python manage.py task_schedules --sync` imports those schedules into local `TaskSchedule` rows (remote-to-local only, no QStash writes; add `--no-input` for unattended runs)
 
 QStash dead letter queue:
 - `python manage.py qstash_dlq --list` list exhausted QStash messages
