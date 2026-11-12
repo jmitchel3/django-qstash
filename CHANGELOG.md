@@ -17,6 +17,13 @@ All notable changes to this project will be documented in this file.
   failures and prints a created/updated/failed summary.
 
 ### Added
+- Declarative schedule reconciliation: `ScheduleSpec` and
+  `reconcile_schedules()` in `django_qstash.schedules.reconcile`, plus the
+  `qstash_reconcile_schedules` management command. Deterministic
+  `"<namespace>.<key>"` schedule ids, per-environment namespaces, dry runs,
+  JSON results, domain-move resync, and rerun-to-repair failure handling. New
+  settings `DJANGO_QSTASH_SCHEDULE_NAMESPACE` and
+  `DJANGO_QSTASH_SCHEDULE_SPECS`.
 - `django_qstash.schedules.services.remote_sync_suppressed()` context manager
   and `import_remote_schedule()` for saving `TaskSchedule` rows without QStash
   writes.
