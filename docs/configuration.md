@@ -181,6 +181,35 @@ real (non-eager) `.delay()`/`.apply_async()`.
 DJANGO_QSTASH_RESULT_POLL_INTERVAL = 0.5
 ```
 
+### `DJANGO_QSTASH_SCHEDULE_NAMESPACE`
+
+- **Type**: `str`
+- **Required**: Only for schedule reconciliation
+- **Default**: `None`
+
+Per-environment prefix for schedules managed by
+[`reconcile_schedules`](api-reference.md#schedule-reconciliation). Reconciled
+schedule ids are `"<namespace>.<key>"`. Use a different value in each
+environment that shares a QStash account (for example `"stage"` and `"prod"`).
+Letters, digits, `_` and `-` only.
+
+```python
+DJANGO_QSTASH_SCHEDULE_NAMESPACE = "prod"
+```
+
+### `DJANGO_QSTASH_SCHEDULE_SPECS`
+
+- **Type**: `str` (dotted path)
+- **Required**: No
+- **Default**: `None`
+
+Default `--specs` for `qstash_reconcile_schedules`: a dotted path to a list, or
+a zero-argument callable returning a list, of `ScheduleSpec` objects or dicts.
+
+```python
+DJANGO_QSTASH_SCHEDULE_SPECS = "myapp.schedules.SCHEDULES"
+```
+
 ### `DJANGO_QSTASH_RESULT_TTL`
 
 - **Type**: `int`

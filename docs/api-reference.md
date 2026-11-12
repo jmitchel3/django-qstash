@@ -1081,6 +1081,27 @@ Schedule ID: sched_def456
 
 ---
 
+### `qstash_reconcile_schedules`
+
+Converge this application's declared schedules (local `TaskSchedule` rows and
+QStash) to a list of specs. See [Schedule reconciliation](#schedule-reconciliation).
+
+```bash
+python manage.py qstash_reconcile_schedules --specs myapp.schedules.SCHEDULES --namespace prod
+```
+
+| Option | Description |
+|--------|-------------|
+| `--specs` | Dotted path to a list (or zero-arg callable) of specs; defaults to `DJANGO_QSTASH_SCHEDULE_SPECS` |
+| `--namespace` | Per-environment id prefix; defaults to `DJANGO_QSTASH_SCHEDULE_NAMESPACE` |
+| `--dry-run` | Report created/changed/resynced/unchanged without writing anything |
+| `--resync` | Push every spec to QStash even when no drift is detected |
+| `--json` | Print the machine-readable result |
+
+Exits nonzero when configuration is invalid or any entry fails.
+
+---
+
 ### `qstash_dlq`
 
 List, inspect, and delete QStash dead letter queue messages.
@@ -1123,6 +1144,92 @@ python manage.py qstash_dlq --get dlq_abc123
 python manage.py qstash_dlq --delete dlq_abc123
 python manage.py qstash_dlq --delete-many dlq_abc123 dlq_def456
 ```
+
+---
+
+## Schedule reconciliation
+
+`task_schedules --sync` imports QStash into the database. Reconciliation goes
+the other way for schedules your application owns: you declare them in code,
+and each deploy converges both the database and QStash to that declaration.
+
+```python
+# myapp/schedules.py
+from django_qstash.schedules.reconcile import ScheduleSpec
+
+SCHEDULES = [
+    ScheduleSpec(
+        key="nightly-report",
+        task="myapp.tasks.nightly_report",  # or the @stashed_task function
+        cron="0 3 * * *",
+        retries=2,
+        timeout="5m",
+        kwargs={"full": True},
+    ),
+]
+```
+
+```python
+from django_qstash.schedules.reconcile import reconcile_schedules
+
+result = reconcile_schedules(SCHEDULES, namespace="prod", dry_run=False)
+if not result.ok:
+    for outcome in result.failed:
+        print(outcome.schedule_id, outcome.error)
+print(result.to_dict())
+```
+
+`ScheduleSpec` fields match the `TaskSchedule` fields (`name`, `task`, `cron`,
+`args`, `kwargs`, `retries`, `timeout`, `retry_delay`, `delay`, `queue`,
+`headers`, `callback`, `callback_headers`, `failure_callback`,
+`failure_callback_headers`, `flow_control`, `label`, `redact`, `is_active`)
+with the same defaults. Every field is compared on each run, so changing a
+default or a value in your spec updates existing schedules. Dicts with the same
+keys are accepted in place of `ScheduleSpec`.
+
+**Identity.** The QStash schedule id is `"<namespace>.<key>"` and is set by
+django-qstash when the schedule is created (QStash treats a create with an
+existing id as an update). Repeat runs, and runs after a partial failure, update
+the same schedule and the same local row; they never create duplicates.
+
+**Environments.** The namespace (`namespace=` or
+`DJANGO_QSTASH_SCHEDULE_NAMESPACE`, required) keeps environments apart when
+they share a QStash account. A run only reads and writes ids with its own
+prefix, so stage and production cannot alter each other.
+
+**Domain moves.** On every run the remote schedule is compared with the local
+row: destination (the current callback URL), cron, retries, task payload, and
+paused state. A mismatch, or a missing remote schedule, is pushed and reported
+as `resynced`. Changing `DJANGO_QSTASH_DOMAIN` or `DJANGO_QSTASH_WEBHOOK_PATH`
+therefore converges on the next run while keeping the schedule id. Headers,
+callbacks, and flow control are not compared remotely; pass `resync=True`
+(`--resync`) to push everything after editing those directly in QStash.
+
+**Result.** `reconcile_schedules` returns a `ReconcileResult` and does not raise
+for per-entry failures. Each `ScheduleOutcome` has `key`, `schedule_id`,
+`action` (`created`, `changed`, `resynced`, `unchanged`, `failed`), `changes`
+(`{field: [old, new]}`), `remote_drift` (reasons QStash needed a push),
+`error`, and `local_saved`. `result.to_dict()` is JSON-serializable.
+`dry_run=True` computes the same result without writing.
+
+**Failure semantics.** The local row is saved first (validated with
+`full_clean()`, without triggering the `post_save` QStash sync), then QStash is
+updated. These are separate operations; the database transaction does not make
+the QStash call atomic.
+
+- Local save fails: nothing is sent to QStash; the entry is `failed` with
+  `local_saved=False`.
+- QStash call fails after the local save: the entry is `failed` with
+  `local_saved=True`. The next run sees the local row is current, detects the
+  remote drift, and pushes again.
+- Listing QStash schedules fails: every entry is `failed` and nothing is written.
+
+Configuration problems (missing namespace, invalid or duplicate keys, missing
+callback domain) raise before anything is written.
+
+**Scope.** Only ids generated from your specs are touched. Schedules missing
+from the specs (including ones you removed) are not deleted, and unrelated
+schedules, local or remote, are never adopted or modified.
 
 ---
 

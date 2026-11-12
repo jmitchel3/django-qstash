@@ -28,6 +28,12 @@ DEFAULTS: dict[str, Any] = {
     "DJANGO_QSTASH_ALWAYS_EAGER": False,
     # Seconds between polls when AsyncResult.get() waits on the results backend.
     "DJANGO_QSTASH_RESULT_POLL_INTERVAL": 0.5,
+    # Schedule reconciliation
+    # Per-environment prefix for reconciled schedule ids ("<namespace>.<key>").
+    "DJANGO_QSTASH_SCHEDULE_NAMESPACE": None,
+    # Dotted path to a list (or zero-arg callable returning a list) of
+    # ScheduleSpec objects/dicts for the qstash_reconcile_schedules command.
+    "DJANGO_QSTASH_SCHEDULE_SPECS": None,
 }
 
 
