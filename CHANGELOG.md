@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- `task_schedules --sync --no-input` no longer reads stdin, so unattended
+  imports work with closed stdin.
+- `task_schedules` only lists and imports schedules whose destination exactly
+  matches this environment's callback URL; other environments' and
+  applications' schedules are ignored without parsing their payloads.
+- Importing remote schedules no longer triggers the `post_save` sync back to
+  QStash, and now preserves remote retries, timeout, delay, retry delay, queue,
+  label, callbacks, headers, flow control, and paused state.
+- `task_schedules` exits nonzero on configuration, provider, or import
+  failures and prints a created/updated/failed summary.
+
+### Added
+- `django_qstash.schedules.services.remote_sync_suppressed()` context manager
+  and `import_remote_schedule()` for saving `TaskSchedule` rows without QStash
+  writes.
+
 ## [0.8.1] - 2026-07-06
 
 ### Changed

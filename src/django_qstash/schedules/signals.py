@@ -20,6 +20,8 @@ def sync_schedule_to_qstash_receiver(
     """
     Sync the django-qstash TaskSchedule to QStash on save.
     """
+    if services.is_remote_sync_suppressed():
+        return
     services.sync_task_schedule_instance_to_qstash(instance)
 
 
@@ -29,4 +31,6 @@ def delete_schedule_from_qstash_receiver(
     instance: TaskSchedule,
     **kwargs: Any,
 ) -> None:
+    if services.is_remote_sync_suppressed():
+        return
     services.delete_task_schedule_from_qstash(instance)

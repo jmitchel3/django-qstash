@@ -863,21 +863,43 @@ python manage.py clear_stale_results --delay
 
 ### `task_schedules`
 
-List and sync QStash schedules.
+List QStash schedules that target this environment's callback URL, or import
+them into local `TaskSchedule` rows.
 
 ```bash
 python manage.py task_schedules --list
 ```
 
-**Requirements:** `django_qstash.schedules` must be installed.
+**Requirements:** `django_qstash.schedules` must be installed for `--sync`.
+
+**Scope:** only schedules whose destination exactly equals this environment's
+callback URL (`DJANGO_QSTASH_DOMAIN` + `DJANGO_QSTASH_WEBHOOK_PATH`) are shown
+or imported. Schedules for other environments (for example stage and
+production under one QStash account) or other applications are counted and
+ignored, and their payloads are never parsed.
+
+**Direction:** `--sync` is a one-way, remote-to-local import. It creates or
+updates local rows keyed by `schedule_id` and never creates, updates, pauses,
+resumes, or deletes anything in QStash. Imported rows keep the remote cron,
+args/kwargs, retries, timeout, delay, retry delay, queue, label, callbacks,
+headers, flow control, and paused state, so a later admin edit re-publishes the
+same delivery configuration. Redaction settings are not reported by QStash, so
+an existing local `redact` value is left as is. Nothing is pruned or deleted.
 
 **Options:**
 
 | Option | Description |
 |--------|-------------|
-| `--list` | List all schedules from QStash |
-| `--sync` | Sync remote schedules to local database |
-| `--no-input` | Skip confirmation prompt during sync |
+| `--list` | List schedules for this callback URL (read-only) |
+| `--sync` | Import schedules for this callback URL into the local database |
+| `--no-input` | Do not prompt for confirmation; stdin is never read |
+
+**Exit status:** nonzero when configuration is missing, listing schedules from
+QStash fails, or any schedule fails to import. Partial failures still import
+the valid schedules and print a summary such as
+`Imported 2 of 3 schedules (1 created, 1 updated, 1 failed).`, with one line
+per failed schedule on stderr. Answering `n` at the prompt exits successfully;
+running `--sync` without `--no-input` when stdin is closed fails.
 
 **Examples:**
 
@@ -885,17 +907,20 @@ python manage.py task_schedules --list
 # List schedules
 python manage.py task_schedules --list
 
-# Sync schedules to local database
+# Import schedules to the local database (prompts)
 python manage.py task_schedules --sync
 
-# Sync without confirmation
+# Import unattended (CI, release phase, cron)
 python manage.py task_schedules --sync --no-input
 ```
+
+To write local rows without triggering QStash calls from your own code, wrap
+the saves in `django_qstash.schedules.services.remote_sync_suppressed()`.
 
 **Output Example:**
 
 ```
-Found 2 remote schedules based on destination: https://example.com/qstash/webhook/
+Found 2 remote schedules for destination: https://example.com/qstash/webhook/
 
 Schedule ID: sched_abc123
   Task: Daily Report (myapp.tasks.generate_daily_report)
