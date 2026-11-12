@@ -7,7 +7,12 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": ":memory:",
-    }
+    },
+    # Secondary alias used to exercise transaction.on_commit(using="other").
+    "other": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": ":memory:",
+    },
 }
 
 INSTALLED_APPS: list[str] = [

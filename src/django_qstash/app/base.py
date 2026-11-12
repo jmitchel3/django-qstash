@@ -19,6 +19,8 @@ from typing import overload
 from asgiref.sync import async_to_sync
 from django.apps import apps
 from django.core.exceptions import ImproperlyConfigured
+from django.db import DEFAULT_DB_ALIAS
+from django.db import transaction
 
 from django_qstash.callbacks import get_callback_url
 from django_qstash.client import qstash_client
@@ -28,6 +30,7 @@ from django_qstash.exceptions import MaxRetriesExceededError
 from django_qstash.exceptions import Retry
 from django_qstash.exceptions import TaskResultError
 from django_qstash.exceptions import TaskTimeoutError
+from django_qstash.logging import get_correlation_id
 from django_qstash.settings import qstash_settings
 from django_qstash.utils import import_string
 
@@ -688,6 +691,112 @@ class QStashTask(Generic[R]):
             parent_task_id=_qstash_parent_task_id,
             _retries=_qstash_retries,
             **options,
+        )
+
+    def _on_commit(
+        self,
+        publish: Callable[[], Any],
+        *,
+        method: str,
+        correlation_id: str,
+        using: str | None,
+        robust: bool,
+    ) -> None:
+        """Register ``publish`` to run after the current transaction commits.
+
+        The registered callback logs any publish failure through the
+        ``django_qstash`` logger (``task_enqueue_failed``) and then re-raises,
+        so the failure is visible whether or not ``robust`` is set. With
+        ``robust=False`` the exception propagates out of the commit; with
+        ``robust=True`` Django logs and swallows it.
+        """
+        task_name = self.name or ""
+        function_path = (
+            f"{self.func.__module__}.{self.func.__name__}" if self.func else task_name
+        )
+
+        def publish_after_commit() -> None:
+            try:
+                publish()
+            except Exception as exc:
+                logger.exception(
+                    "task_enqueue_failed",
+                    extra={
+                        "task": function_path,
+                        "task_name": task_name,
+                        "method": method,
+                        "correlation_id": correlation_id or get_correlation_id(),
+                        "database": using or DEFAULT_DB_ALIAS,
+                        "robust": robust,
+                        "status": "enqueue_error",
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                raise
+
+        publish_after_commit.__qualname__ = f"{task_name or 'task'}.{method}"
+        transaction.on_commit(publish_after_commit, using=using, robust=robust)
+
+    def delay_on_commit(self, *args: Any, **kwargs: Any) -> None:
+        """Publish ``delay(*args, **kwargs)`` after the current transaction commits.
+
+        Celery 5.4 compatible. The call is registered with
+        ``django.db.transaction.on_commit`` on the default database: it is
+        discarded if the transaction (or the enclosing savepoint) rolls back,
+        and runs immediately when no atomic block is active. Arguments are
+        captured at call time, so later mutation of the caller's containers
+        does not change what is published.
+
+        Returns ``None``: the QStash message id is unknown until the commit
+        happens, so no ``AsyncResult`` can be returned. All positional and
+        keyword arguments belong to the task; to target another database alias
+        use :meth:`apply_async_on_commit` with ``using=``.
+        """
+        captured_args = tuple(args)
+        captured_kwargs = dict(kwargs)
+        self._on_commit(
+            lambda: self.delay(*captured_args, **captured_kwargs),
+            method="delay_on_commit",
+            correlation_id="",
+            using=None,
+            robust=False,
+        )
+
+    def apply_async_on_commit(
+        self,
+        args: tuple[Any, ...] | None = None,
+        kwargs: dict[str, Any] | None = None,
+        *,
+        using: str | None = None,
+        robust: bool = False,
+        **options: Any,
+    ) -> None:
+        """Publish ``apply_async(...)`` after the current transaction commits.
+
+        Celery 5.4 compatible. ``options`` accepts everything
+        :meth:`apply_async` does (``countdown``, ``eta``, ``link``, QStash
+        message options). ``using`` selects the database alias whose
+        transaction gates the publish (default database when ``None``).
+
+        With ``robust=False`` (the default) an exception raised while publishing
+        propagates out of the commit, per Django's ``on_commit`` semantics. With
+        ``robust=True`` Django logs and swallows it. In both modes the failure
+        is also logged as ``task_enqueue_failed`` by the ``django_qstash``
+        logger; a failed publish is never reported as success.
+
+        Returns ``None`` because the QStash message id is unknown until commit.
+        """
+        captured_args = tuple(args or ())
+        captured_kwargs = dict(kwargs or {})
+        captured_options = dict(options)
+        self._on_commit(
+            lambda: self.apply_async(
+                args=captured_args, kwargs=captured_kwargs, **captured_options
+            ),
+            method="apply_async_on_commit",
+            correlation_id=str(captured_options.get("_qstash_correlation_id") or ""),
+            using=using,
+            robust=robust,
         )
 
     def apply(

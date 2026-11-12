@@ -20,6 +20,15 @@ All notable changes to this project will be documented in this file.
 - `django_qstash.schedules.services.remote_sync_suppressed()` context manager
   and `import_remote_schedule()` for saving `TaskSchedule` rows without QStash
   writes.
+- `QStashTask.delay_on_commit()` and `QStashTask.apply_async_on_commit()`
+  (Celery 5.4 names) publish a task only after the surrounding database
+  transaction commits, via `transaction.on_commit`. Rollbacks and savepoint
+  rollbacks discard the publish, calls outside a transaction publish
+  immediately, and eager mode keeps the commit boundary. They return `None`
+  because no message id exists until commit. `apply_async_on_commit` accepts
+  `using=` for a non-default database alias and `robust=`; publish failures are
+  logged as `task_enqueue_failed` in both modes. See the API reference for the
+  crash-window and enqueue-vs-execution failure notes.
 
 ## [0.8.1] - 2026-07-06
 
