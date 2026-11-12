@@ -10,6 +10,7 @@ This document provides detailed documentation for all public APIs in django-qsta
 - [Task Methods](#task-methods)
   - [.delay()](#delay)
   - [.apply_async()](#apply_async)
+  - [.delay_on_commit() / .apply_async_on_commit()](#delay_on_commit--apply_async_on_commit)
   - [.apply()](#apply)
   - [Direct Execution](#direct-execution)
 - [Bound Tasks (bind=True)](#bound-tasks-bindtrue)
@@ -238,6 +239,147 @@ send_email.apply_async(
 ```python
 send_email.apply_async(args=("user@example.com",), max_retries=5)
 ```
+
+---
+
+### `.delay_on_commit()` / `.apply_async_on_commit()`
+
+Publish a task only after the current database transaction commits. This
+replaces the common `transaction.on_commit(lambda: task.delay(...))` pattern
+and prevents tasks from being published for rows that were rolled back. The
+names match Celery 5.4.
+
+#### Signature
+
+```python
+def delay_on_commit(self, *args, **kwargs) -> None: ...
+
+
+def apply_async_on_commit(
+    self,
+    args: tuple | None = None,
+    kwargs: dict | None = None,
+    *,
+    using: str | None = None,
+    robust: bool = False,
+    **options: Any,
+) -> None: ...
+```
+
+#### Parameters
+
+`delay_on_commit` passes every positional and keyword argument to the task,
+exactly like `.delay()`. It always uses the default database. It has no
+`using` argument, because any keyword belongs to the task; call
+`apply_async_on_commit(..., using="other")` to target another database alias.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `args` | `tuple` | `None` | Positional arguments for the task |
+| `kwargs` | `dict` | `None` | Keyword arguments for the task |
+| `using` | `str` | `None` | Database alias whose transaction gates the publish (`None` means the default database) |
+| `robust` | `bool` | `False` | Passed to `transaction.on_commit`; see [Publish failures](#publish-failures-after-commit) |
+| `**options` | | `{}` | Anything `.apply_async()` accepts: `countdown`, `eta`, `link`, `queue`, and QStash message options |
+
+Arguments and options are captured when you call the method (the containers
+are copied), so mutating your own `args` list or `kwargs` dict afterwards does
+not change what is published.
+
+#### Returns
+
+`None`. The QStash message id does not exist until the transaction commits
+and the publish actually happens, so there is no honest `AsyncResult` to
+return. If you need the message id, call `.delay()` / `.apply_async()` yourself
+from a `transaction.on_commit` callback.
+
+#### Example
+
+```python
+from django.db import transaction
+
+from myapp.models import Order
+from myapp.tasks import send_receipt
+
+
+def place_order(request):
+    with transaction.atomic():
+        order = Order.objects.create(user=request.user)
+        send_receipt.delay_on_commit(order.pk)
+    # send_receipt is published here, after the commit.
+
+
+# Targeting a non-default database alias, with delivery options
+with transaction.atomic(using="billing"):
+    invoice = Invoice.objects.using("billing").create(total=100)
+    send_invoice.apply_async_on_commit(
+        args=(invoice.pk,), using="billing", countdown=60
+    )
+```
+
+#### Transaction behavior
+
+The helpers register the publish with Django's
+`transaction.on_commit(callback, using=using, robust=robust)` and rely on its
+semantics:
+
+- **Commit:** the task is published once, after the outermost `atomic()` block
+  on that database exits successfully. Exiting an inner `atomic()` (a
+  savepoint) does not publish.
+- **Rollback:** if the transaction rolls back, nothing is published. If only a
+  savepoint rolls back, the calls made inside that savepoint are discarded and
+  calls made outside it still publish on commit.
+- **Outside a transaction:** when the connection is in autocommit mode (no
+  active `atomic()` block on that alias), the task is published immediately.
+  An open transaction on a *different* alias does not delay it.
+- **Eager mode:** with `DJANGO_QSTASH_ALWAYS_EAGER = True` the commit boundary
+  is still respected: the task body runs inline at commit time, not at call
+  time, so tests see the same ordering as production. The resulting
+  `EagerResult` is discarded; an exception raised by the task body is captured
+  on it, as with eager `.delay()`, and does not propagate.
+
+In Django `TestCase` tests (or `pytest.mark.django_db` without
+`transaction=True`) the test is wrapped in a transaction that never commits,
+so the callbacks never fire on their own. Use `captureOnCommitCallbacks` /
+the `django_capture_on_commit_callbacks` pytest fixture with `execute=True`,
+or a transactional test.
+
+#### Publish failures after commit
+
+Publishing happens after the commit, so an error from QStash (network failure,
+bad token, rejected options) cannot roll back your data.
+
+- **`robust=False` (default):** the exception propagates out of the
+  `atomic()` block (or the `on_commit()` call, outside a transaction) per
+  Django's `on_commit` semantics. The data is already committed; remaining
+  `on_commit` callbacks for that transaction do not run.
+- **`robust=True`:** Django logs the exception and swallows it, and later
+  callbacks still run.
+
+In both modes django-qstash also logs an `ERROR` record named
+`task_enqueue_failed` on the `django_qstash.app.base` logger, with exception
+info and the extra fields `task` (function path), `task_name`, `method`,
+`correlation_id` (when one is known), `database`, `robust`, `status`
+(`enqueue_error`), and `error_type`. A failed publish is never reported as
+success.
+
+#### Operational notes
+
+- **Crash window.** There is a gap between the database commit and the QStash
+  publish. If the process dies in that gap (worker killed, deploy, timeout) or
+  the publish fails, the row exists but no task was sent. These helpers are
+  not an exactly-once or guaranteed-delivery mechanism. If you need durable
+  delivery, write an outbox row in the same transaction and run a reconciler
+  that publishes (and retries) pending rows.
+- **Enqueue failure vs. task failure.** A failed *publish* happens in your
+  process at commit time: it is raised or logged as `task_enqueue_failed`
+  (above), QStash never received a message, no `TaskResult` row is created,
+  and no `task_failed` signal is sent. A failed *execution* happens later in
+  the webhook: the handler logs `task_failed`, sends the `task_failed` signal,
+  stores a `TaskResult` with an error status (when `django_qstash.results` is
+  installed), and QStash may retry or
+  dead-letter the message. See [Serverless Observability](observability.md)
+  for those facilities. Alert on `task_enqueue_failed` log records to catch the
+  first kind.
 
 ---
 
