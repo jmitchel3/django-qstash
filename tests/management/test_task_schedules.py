@@ -302,3 +302,37 @@ class TestTaskSchedulesCommand:
             with pytest.raises(CommandError, match="DJANGO_QSTASH_DOMAIN"):
                 run("--list")
         client.schedule.list.assert_not_called()
+
+
+@pytest.mark.django_db
+class TestAllDestinations:
+    @patch(CMD_CLIENT)
+    def test_list_all_destinations_shows_everything_read_only(self, client):
+        client.schedule.list.return_value = [
+            remote("mine"),
+            remote("old-domain", destination="https://old.example.com/qstash/webhook/"),
+            remote("foreign", destination="https://other.app/hook", body="not json"),
+        ]
+        out, _ = run("--list", "--all-destinations")
+
+        assert "Found 1 remote schedules for destination" in out
+        assert "Also showing 2 schedules with other destinations" in out
+        for schedule_id in ("mine", "old-domain", "foreign"):
+            assert f"Schedule ID: {schedule_id}" in out
+        assert "Destination: https://old.example.com/qstash/webhook/" in out
+        assert "not a django-qstash task payload" in out
+        assert TaskSchedule.objects.count() == 0
+        assert_no_remote_writes(client)
+
+    @patch(CMD_CLIENT)
+    def test_default_list_hints_at_flag(self, client):
+        client.schedule.list.return_value = [remote("x", destination=OTHER_DEST)]
+        out, _ = run("--list")
+        assert "--all-destinations" in out
+        assert "Schedule ID: x" not in out
+
+    @patch(CMD_CLIENT)
+    def test_rejected_with_sync(self, client):
+        with pytest.raises(CommandError, match="only works with --list"):
+            run("--sync", "--all-destinations", "--no-input")
+        client.schedule.list.assert_not_called()

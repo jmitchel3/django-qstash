@@ -46,6 +46,15 @@ class Command(BaseCommand):
             ),
         )
         parser.add_argument(
+            "--all-destinations",
+            action="store_true",
+            help=(
+                "With --list, show schedules for every destination, not just "
+                "this callback URL (for finding schedules left under an old "
+                "domain). Not allowed with --sync."
+            ),
+        )
+        parser.add_argument(
             "--no-input",
             "--noinput",
             action="store_true",
@@ -56,6 +65,11 @@ class Command(BaseCommand):
     def handle(self, *args: Any, **options: Any) -> None:
         if not (options.get("sync") or options.get("list")):
             raise CommandError("Please specify either --list or --sync option")
+        if options.get("all_destinations") and options.get("sync"):
+            raise CommandError(
+                "--all-destinations only works with --list; --sync always imports "
+                "just this callback URL's schedules"
+            )
 
         if options.get("sync"):
             try:
@@ -85,13 +99,20 @@ class Command(BaseCommand):
                 f"Found {len(schedules)} remote schedules for destination: {destination}"
             )
         )
-        if skipped:
+        if skipped and options.get("all_destinations"):
+            self.stdout.write(
+                f"Also showing {skipped} schedules with other destinations "
+                "(--all-destinations)."
+            )
+        elif skipped:
             self.stdout.write(
                 f"Ignored {skipped} schedules with other destinations "
-                "(other environments or applications)."
+                "(other environments or applications). Use --list "
+                "--all-destinations to show them."
             )
 
-        for schedule in schedules:
+        shown = remote if options.get("all_destinations") else schedules
+        for schedule in shown:
             self._describe(schedule)
 
         if not options.get("sync"):

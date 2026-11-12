@@ -2,7 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.9.0] - 2026-11-12
+
+### Behavior changes (`task_schedules`)
+Review these before upgrading if you script `task_schedules`:
+- Errors now exit nonzero and go to stderr. Previously, a failed QStash call,
+  missing configuration, an unparseable payload, or a missing `--list`/`--sync`
+  printed a message to stdout and exited 0.
+- Only schedules whose destination exactly matches the current callback URL
+  are listed or imported. Schedules created under an old domain or webhook
+  path, or by other applications, are no longer shown by default; use
+  `--list --all-destinations` to find them.
+- `--sync` no longer re-sends imported schedules to QStash. It previously ran a
+  create/update for each imported schedule with this environment's callback
+  URL and options.
+- `--sync` now copies remote retries, timeout, delay, retry delay, queue, label,
+  callbacks, headers, flow control, and paused state into the local row,
+  replacing local values for those fields.
+- Output wording changed ("for destination" instead of "based on destination",
+  a new confirmation prompt, and an import summary line).
+- `Command.get_task_schedule_model()` and `Command.sync_schedules()` were
+  removed; subclasses that override them need updating.
 
 ### Fixed
 - `task_schedules --sync --no-input` no longer reads stdin, so unattended
@@ -24,6 +44,8 @@ All notable changes to this project will be documented in this file.
   JSON results, domain-move resync, and rerun-to-repair failure handling. New
   settings `DJANGO_QSTASH_SCHEDULE_NAMESPACE` and
   `DJANGO_QSTASH_SCHEDULE_SPECS`.
+- `task_schedules --list --all-destinations` shows schedules for every
+  destination (read-only), for finding schedules left under an old domain.
 - `django_qstash.schedules.services.remote_sync_suppressed()` context manager
   and `import_remote_schedule()` for saving `TaskSchedule` rows without QStash
   writes.

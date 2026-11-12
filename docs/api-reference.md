@@ -1034,6 +1034,7 @@ an existing local `redact` value is left as is. Nothing is pruned or deleted.
 |--------|-------------|
 | `--list` | List schedules for this callback URL (read-only) |
 | `--sync` | Import schedules for this callback URL into the local database |
+| `--all-destinations` | With `--list`, also show schedules for other destinations (for example ones left under an old domain); rejected with `--sync` |
 | `--no-input` | Do not prompt for confirmation; stdin is never read |
 
 **Exit status:** nonzero when configuration is missing, listing schedules from
@@ -1048,6 +1049,9 @@ running `--sync` without `--no-input` when stdin is closed fails.
 ```bash
 # List schedules
 python manage.py task_schedules --list
+
+# Find schedules still pointing at an old domain (read-only)
+python manage.py task_schedules --list --all-destinations
 
 # Import schedules to the local database (prompts)
 python manage.py task_schedules --sync
