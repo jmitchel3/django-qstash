@@ -1,0 +1,116 @@
+name: Live e2e
+
+# Round trip against real Upstash QStash: enqueue a task, QStash calls the
+# webhook through a temporary Cloudflare quick tunnel, the result is stored.
+# Runs on demand and on release tags (each run spends QStash messages).
+# Secrets are synced from Doppler (project "dev", config "prd").
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/live-e2e.yaml'
+  push:
+    tags:
+      - '**'
+
+concurrency:
+  group: live-e2e
+  cancel-in-progress: false
+
+env:
+  CLOUDFLARED_VERSION: '2026.10.3'
+  PORT: '8740'
+
+jobs:
+  live-e2e:
+    name: Real QStash round trip
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: sample_project
+    env:
+      QSTASH_TOKEN: ${{ secrets.QSTASH_TOKEN }}
+      QSTASH_URL: ${{ secrets.QSTASH_URL }}
+      QSTASH_CURRENT_SIGNING_KEY: ${{ secrets.QSTASH_CURRENT_SIGNING_KEY }}
+      QSTASH_NEXT_SIGNING_KEY: ${{ secrets.QSTASH_NEXT_SIGNING_KEY }}
+      DJANGO_SECRET_KEY: ${{ secrets.DJANGO_SECRET_KEY }}
+      DJANGO_QSTASH_WEBHOOK_PATH: /qstash/webhook/
+      DJANGO_DEBUG: 'True'
+      # The tunnel terminates TLS, so Django sees http while QStash signs https.
+      DJANGO_QSTASH_FORCE_HTTPS: 'True'
+      # Placeholder for server startup; the smoke step sets the tunnel URL.
+      DJANGO_QSTASH_DOMAIN: http://127.0.0.1:8740
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install cloudflared
+        timeout-minutes: 3
+        working-directory: .
+        run: |
+          curl -fsSL -o /tmp/cloudflared \
+            "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64"
+          sudo install -m 0755 /tmp/cloudflared /usr/local/bin/cloudflared
+          cloudflared --version
+
+      - name: Migrate
+        timeout-minutes: 5
+        run: uv run python manage.py migrate -v0
+
+      - name: Start Django
+        timeout-minutes: 2
+        run: |
+          nohup uv run python manage.py runserver "127.0.0.1:${PORT}" --noreload \
+            > "$RUNNER_TEMP/django.log" 2>&1 &
+          for i in $(seq 1 60); do
+            curl -fsS -o /dev/null "http://127.0.0.1:${PORT}/admin/login/" && exit 0
+            sleep 1
+          done
+          echo "Django did not start"; cat "$RUNNER_TEMP/django.log"; exit 1
+
+      - name: Start quick tunnel
+        id: tunnel
+        timeout-minutes: 3
+        run: |
+          nohup cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:${PORT}" \
+            > "$RUNNER_TEMP/cloudflared.log" 2>&1 &
+          url=""
+          for i in $(seq 1 60); do
+            url=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$RUNNER_TEMP/cloudflared.log" | head -1 || true)
+            [ -n "$url" ] && break
+            sleep 1
+          done
+          [ -n "$url" ] || { echo "No tunnel URL"; cat "$RUNNER_TEMP/cloudflared.log"; exit 1; }
+          # New quick-tunnel hostnames take a few seconds to resolve publicly.
+          for i in $(seq 1 90); do
+            curl -fsS -o /dev/null "$url/admin/login/" && break
+            sleep 2
+          done
+          curl -fsS -o /dev/null "$url/admin/login/"
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "Tunnel: $url"
+
+      - name: Smoke test
+        timeout-minutes: 3
+        env:
+          DJANGO_QSTASH_DOMAIN: ${{ steps.tunnel.outputs.url }}
+        run: uv run python manage.py qstash_smoke_test --timeout 90
+
+      - name: Logs
+        if: always()
+        timeout-minutes: 1
+        working-directory: .
+        run: |
+          echo "::group::django.log"; cat "$RUNNER_TEMP/django.log" || true; echo "::endgroup::"
+          echo "::group::cloudflared.log"; cat "$RUNNER_TEMP/cloudflared.log" || true; echo "::endgroup::"
