@@ -43,6 +43,18 @@ scripts:
   sample_smoke:
     # End-to-end round-trip check: enqueue a task, wait for the webhook result.
     - cd sample_project && uv run python manage.py qstash_smoke_test
+  # --- Live end-to-end against real Upstash QStash (maintainer only) ---
+  # Needs Doppler access (project "dev", config "dev") and the Cloudflare
+  # tunnel django-qstash-dev.jmitchel3.com -> http://127.0.0.1:8740.
+  # Doppler must set QSTASH_URL to the account's regional endpoint, or the
+  # local-dev value in sample_project/.env wins. FORCE_HTTPS is needed because
+  # the tunnel terminates TLS, so Django sees http but QStash signs https.
+  live_server:
+    - cd sample_project && doppler run -p dev -c dev -- uv run python manage.py migrate
+    - cd sample_project && DJANGO_QSTASH_FORCE_HTTPS=True doppler run -p dev -c dev -- uv run python manage.py runserver 127.0.0.1:8740
+  live_smoke:
+    # Run in a second terminal while `rav run live_server` is up.
+    - cd sample_project && DJANGO_QSTASH_FORCE_HTTPS=True doppler run -p dev -c dev -- uv run python manage.py qstash_smoke_test --timeout 60
   makemigrations:
     - cd sample_project && uv run python manage.py makemigrations
     - cd sample_project && uv run python manage.py migrate
