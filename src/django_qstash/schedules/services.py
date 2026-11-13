@@ -165,7 +165,7 @@ def _header_map(value: Any, forward_prefix: str = "") -> dict[str, str] | None:
     return result
 
 
-def _flow_control(value: Any) -> dict[str, Any] | None:
+def _flow_control(value: Any) -> dict[str, Any]:
     if value is None:
         return {}
     if isinstance(value, dict):
@@ -242,9 +242,7 @@ def remote_schedule_to_fields(schedule: Any) -> dict[str, Any]:
         mapped = _header_map(getattr(schedule, attr, None), prefix)
         fields[field] = mapped if mapped is not None else {}
 
-    flow_control = _flow_control(getattr(schedule, "flow_control", None))
-    if flow_control is not None:
-        fields["flow_control"] = flow_control
+    fields["flow_control"] = _flow_control(getattr(schedule, "flow_control", None))
 
     return fields
 
