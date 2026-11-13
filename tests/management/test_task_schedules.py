@@ -42,7 +42,7 @@ def remote(
         "cron": "0 3 * * *",
         "body": body if isinstance(body, str) else json.dumps(body),
         "retries": 2,
-        "timeout": 300,
+        "timeout": 300000,  # QStash reports milliseconds
         "delay": None,
         "paused": False,
         "headers": None,
@@ -144,7 +144,7 @@ class TestTaskSchedulesCommand:
     def test_remote_attributes_used_when_body_has_no_options(self, client):
         body = {"module": "reports.tasks", "function": "nightly"}
         client.schedule.list.return_value = [
-            remote("mine", body=body, timeout=90, delay=30, label="x")
+            remote("mine", body=body, timeout=90000, delay=30, label="x")
         ]
         run("--sync", "--no-input")
         obj = TaskSchedule.objects.get(schedule_id="mine")

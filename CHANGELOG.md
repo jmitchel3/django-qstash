@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.1] - 2026-11-13
+
+### Fixed
+- `task_schedules --sync` read QStash's reported schedule timeout (milliseconds)
+  as seconds when the schedule body carried no timeout option, importing
+  values such as `300000s`. It now converts to seconds (`300s`). Schedules
+  created by django-qstash 0.8+ were unaffected because their body includes
+  the original timeout string.
+
 ## [0.9.0] - 2026-11-12
 
 ### Behavior changes (`task_schedules`)

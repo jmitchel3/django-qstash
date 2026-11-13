@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -146,6 +147,12 @@ def _duration(value: Any) -> str | None:
     return str(value)
 
 
+def _ms_to_seconds(value: Any) -> Any:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return math.ceil(value / 1000)
+    return value
+
+
 def _header_map(value: Any, forward_prefix: str = "") -> dict[str, str] | None:
     if not value:
         return {} if value is not None else None
@@ -205,8 +212,9 @@ def remote_schedule_to_fields(schedule: Any) -> dict[str, Any]:
     if isinstance(retries, int) and not isinstance(retries, bool):
         fields["retries"] = retries
 
+    # QStash reports a schedule's timeout in milliseconds (and delay in seconds).
     timeout = _duration(options.get("timeout")) or _duration(
-        getattr(schedule, "timeout", None)
+        _ms_to_seconds(getattr(schedule, "timeout", None))
     )
     if timeout:
         fields["timeout"] = timeout

@@ -68,6 +68,16 @@ def test_duration(value, expected):
     assert _duration(value) == expected
 
 
+def test_ms_to_seconds():
+    from django_qstash.schedules.services import _ms_to_seconds
+
+    assert _ms_to_seconds(90000) == 90
+    assert _ms_to_seconds(1500) == 2
+    assert _ms_to_seconds("5m") == "5m"
+    assert _ms_to_seconds(None) is None
+    assert _ms_to_seconds(True) is True
+
+
 def test_header_map():
     assert _header_map(None) is None
     assert _header_map({}) == {}
