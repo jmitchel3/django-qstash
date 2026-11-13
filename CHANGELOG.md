@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.9.2] - 2026-11-13
+
+### Fixed
+
+- Schedule reconciliation now detects failed delivery-option updates after the
+  local save, including headers, callbacks, flow control, and redaction, so a
+  rerun repairs them. Existing reconciled schedules receive a one-time resync
+  to record a fingerprint of the applied specification.
+- Reconciliation dry runs now perform the same model validation as live runs,
+  reporting invalid cron expressions and other invalid field values as failures.
+- `delay_on_commit()` and `apply_async_on_commit()` now snapshot nested task
+  arguments, delivery options, and link signatures when registering callbacks.
+- DLQ requeues preserve the original queue and reported delivery controls,
+  including authentication headers and callbacks. Timeout and redaction are
+  restored when present in stored payload options. Original scheduling and
+  deduplication settings are not reused.
+- DLQ requeues now identify the failed message as their parent and advance both
+  retry-counter payload fields, including messages previously sent by
+  `self.retry()`.
+- `AsyncResult` now follows explicit retry-message links to expose a replacement
+  task's terminal result while retaining the original handle's id. Unrelated
+  linked tasks sharing a correlation id are not treated as retries.
+
+### Behavior changes
+
+- `qstash_requeue` and `qstash_dlq` now exit nonzero and report errors on stderr
+  when arguments are missing/invalid or an operation fails. They previously
+  printed these errors to stdout and exited 0.
+- DLQ requeues retain the original queue by default. Use
+  `qstash_requeue --dlq-id <id> --queue <name>` to select another queue, or
+  `--queue ""` for direct delivery.
+
 ## [0.9.1] - 2026-11-13
 
 ### Fixed

@@ -4,6 +4,7 @@ from typing import Any
 from typing import cast
 
 from django.core.management.base import BaseCommand
+from django.core.management.base import CommandError
 from django.core.management.base import CommandParser
 from qstash.dlq import DlqFilter
 
@@ -43,9 +44,9 @@ def _truncate(value: Any, max_length: int = 240) -> str:
 
 
 class Command(BaseCommand):
-    """Inspect and delete QStash dead letter queue messages."""
+    """Inspect, requeue, and delete QStash dead letter queue messages."""
 
-    help = "List, inspect, and delete QStash DLQ messages"
+    help = "List, inspect, requeue, and delete QStash DLQ messages"
 
     def add_arguments(self, parser: CommandParser) -> None:
         parser.add_argument("--list", action="store_true", help="List DLQ messages")
@@ -103,6 +104,14 @@ class Command(BaseCommand):
             self.stdout.write(f"\nNext cursor: {response.cursor}")
 
     def handle(self, *args: Any, **options: Any) -> None:
+        if not any(
+            options.get(action)
+            for action in ("list", "get", "delete", "requeue", "delete_many")
+        ):
+            raise CommandError(
+                "Please specify --list, --get, --delete, --requeue, or --delete-many"
+            )
+
         try:
             if options.get("list"):
                 self._list_messages(options)
@@ -137,11 +146,5 @@ class Command(BaseCommand):
                 deleted = qstash_client.dlq.delete_many(options["delete_many"])
                 self.stdout.write(self.style.SUCCESS(f"Deleted {deleted} DLQ messages"))
                 return
-
-            self.stdout.write(
-                self.style.ERROR(
-                    "Please specify --list, --get, --delete, --requeue, or --delete-many"
-                )
-            )
         except Exception as e:
-            self.stdout.write(self.style.ERROR(f"An error occurred: {str(e)}"))
+            raise CommandError(f"QStash DLQ operation failed: {e}") from e

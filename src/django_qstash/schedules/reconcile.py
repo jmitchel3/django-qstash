@@ -22,6 +22,7 @@ detects the drift and repairs it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -51,6 +52,7 @@ logger = logging.getLogger(__name__)
 Action = Literal["created", "changed", "resynced", "unchanged", "failed"]
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
+_SPEC_FINGERPRINT_KEY = "_qstash_schedule_spec"
 
 # TaskSchedule fields a spec controls, in the order they are compared.
 SPEC_FIELDS: tuple[str, ...] = (
@@ -240,6 +242,22 @@ def _local_changes(
     return changes
 
 
+def _reconciled_payload(instance: TaskSchedule) -> dict[str, Any]:
+    """Record which spec was pushed, including options QStash cannot echo.
+
+    The digest lets a rerun detect a failed push after the local row was
+    saved. Keep delivery secrets out of the payload: only their contribution
+    to the digest is recorded. The webhook ignores this reserved metadata.
+    """
+    controlled_fields = {name: getattr(instance, name) for name in SPEC_FIELDS}
+    serialized = json.dumps(
+        _jsonable(controlled_fields), sort_keys=True, separators=(",", ":")
+    )
+    payload = prepare_qstash_payload(instance)
+    payload[_SPEC_FINGERPRINT_KEY] = hashlib.sha256(serialized.encode()).hexdigest()
+    return payload
+
+
 def _remote_drift(remote: Any, instance: TaskSchedule, destination: str) -> list[str]:
     if remote is None:
         return ["missing in QStash"]
@@ -256,7 +274,7 @@ def _remote_drift(remote: Any, instance: TaskSchedule, destination: str) -> list
         body = json.loads(getattr(remote, "body", None) or "")
     except (TypeError, ValueError):
         body = None
-    if body != _jsonable(prepare_qstash_payload(instance)):
+    if body != _jsonable(_reconciled_payload(instance)):
         drift.append("payload")
     if bool(getattr(remote, "paused", False)) != (not instance.is_active):
         drift.append("paused" if instance.is_active else "active")
@@ -265,7 +283,9 @@ def _remote_drift(remote: Any, instance: TaskSchedule, destination: str) -> list
 
 def _push(instance: TaskSchedule, remote: Any) -> None:
     """Create or overwrite the QStash schedule, then apply pause state."""
-    qstash_client.schedule.create(**format_task_schedule_for_qstash(instance))
+    data = format_task_schedule_for_qstash(instance)
+    data["body"] = json.dumps(_reconciled_payload(instance))
+    qstash_client.schedule.create(**data)
     schedule_id = str(instance.schedule_id)
     if instance.is_active:
         if remote is not None and getattr(remote, "paused", False):
@@ -378,14 +398,21 @@ def _reconcile_one(
         outcome.error = str(exc)
         return outcome
 
+    planned_action = outcome.action
+    try:
+        instance.full_clean(validate_unique=False)
+    except Exception as exc:
+        logger.exception("Failed to validate schedule %s locally", schedule_id)
+        outcome.action = "failed"
+        outcome.error = f"local validation failed ({planned_action}): {exc}"
+        return outcome
+
     if dry_run or outcome.action == "unchanged":
         return outcome
 
-    planned_action = outcome.action
     try:
         if planned_action in ("created", "changed"):
             with remote_sync_suppressed(), transaction.atomic():
-                instance.full_clean(validate_unique=False)
                 instance.save()
             outcome.local_saved = True
     except Exception as exc:

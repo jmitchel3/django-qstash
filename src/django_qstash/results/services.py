@@ -244,17 +244,22 @@ def _publish_payload(
     *,
     queue: str | None = None,
     url: str | None = None,
+    delivery_options: dict[str, Any] | None = None,
 ) -> RequeueResult:
     target_url = url or get_callback_url()
+    options = delivery_options or {}
     response: Any
     if queue:
         response = qstash_client.message.enqueue_json(
             queue=queue,
             url=target_url,
             body=payload,
+            **options,
         )
     else:
-        response = qstash_client.message.publish_json(url=target_url, body=payload)
+        response = qstash_client.message.publish_json(
+            url=target_url, body=payload, **options
+        )
     message_id = str(getattr(response, "message_id", ""))
     if not message_id:
         raise ValueError("QStash did not return a message id for the requeued task")
@@ -340,10 +345,84 @@ def build_dlq_requeue_payload(message: Any) -> dict[str, Any]:
     payload = _coerce_dlq_body(getattr(message, "body", None))
     parent_task_id = str(getattr(message, "message_id", "") or "")
     correlation_id = str(payload.get("correlation_id") or parent_task_id)
+    # self.retry() writes "retries", while manual requeues historically wrote
+    # only "attempt". Keep both names in sync so the webhook cannot prefer a
+    # stale counter, and retain the highest known count in older mixed bodies.
+    attempt = (
+        max(int(payload.get("retries") or 0), int(payload.get("attempt") or 0), 0) + 1
+    )
     payload["correlation_id"] = correlation_id
-    payload["parent_task_id"] = payload.get("parent_task_id") or parent_task_id
-    payload["attempt"] = int(payload.get("attempt") or 0) + 1
+    payload["parent_task_id"] = parent_task_id
+    payload["attempt"] = attempt
+    payload["retries"] = attempt
     return payload
+
+
+def _dlq_delivery_options(
+    message: Any, payload: dict[str, Any], *, queue: str | None
+) -> dict[str, Any]:
+    """Keep delivery controls while starting a fresh, immediate delivery.
+
+    QStash returns header values as lists, whereas publishing accepts strings.
+    Its DLQ model does not expose timeout or redaction, so those can only be
+    recovered when django-qstash recorded them in the task body's options.
+    Original scheduling and deduplication settings are deliberately not reused.
+    """
+    options: dict[str, Any] = {}
+    for name, attr in (
+        ("method", "method"),
+        ("retry_delay", "retry_delay_expression"),
+        ("callback", "callback"),
+        ("failure_callback", "failure_callback"),
+        ("label", "label"),
+    ):
+        value = getattr(message, attr, None)
+        if isinstance(value, str) and value:
+            options[name] = value
+
+    retries = getattr(message, "max_retries", None)
+    if isinstance(retries, int) and not isinstance(retries, bool):
+        options["retries"] = retries
+
+    for name in ("headers", "callback_headers", "failure_callback_headers"):
+        headers = getattr(message, name, None)
+        if isinstance(headers, dict):
+            options[name] = {
+                str(key): (
+                    ",".join(str(item) for item in value)
+                    if isinstance(value, (list, tuple))
+                    else str(value)
+                )
+                for key, value in headers.items()
+            }
+
+    # enqueue_json does not support flow_control; queue settings govern queued
+    # deliveries, including when the caller explicitly selects a new queue.
+    flow_control = getattr(message, "flow_control", None)
+    if not queue and flow_control is not None:
+        fields = ("key", "parallelism", "rate", "period")
+        values = {
+            name: (
+                flow_control.get(name)
+                if isinstance(flow_control, dict)
+                else getattr(flow_control, name, None)
+            )
+            for name in fields
+        }
+        if isinstance(values["key"], str) and values["key"]:
+            options["flow_control"] = {
+                name: value for name, value in values.items() if value is not None
+            }
+
+    recorded = payload.get("options")
+    if isinstance(recorded, dict):
+        timeout = recorded.get("timeout")
+        if isinstance(timeout, (str, int)) and not isinstance(timeout, bool):
+            options["timeout"] = timeout
+        redact = recorded.get("redact")
+        if isinstance(redact, dict):
+            options["redact"] = dict(redact)
+    return options
 
 
 def requeue_dlq_message(
@@ -352,12 +431,21 @@ def requeue_dlq_message(
     delete_after_requeue: bool = False,
     queue: str | None = None,
 ) -> RequeueResult:
-    """Fetch a QStash DLQ message, re-publish its task body, and optionally delete it."""
+    """Re-publish a DLQ task with its delivery controls and optionally delete it.
+
+    The original queue is retained unless ``queue`` is supplied. Passing an
+    empty string explicitly switches a queued message to direct publishing.
+    """
     message = qstash_client.dlq.get(dlq_id)
+    payload = build_dlq_requeue_payload(message)
+    if queue is None:
+        original_queue = getattr(message, "queue", None)
+        queue = original_queue if isinstance(original_queue, str) else None
     result = _publish_payload(
-        build_dlq_requeue_payload(message),
+        payload,
         queue=queue,
         url=getattr(message, "url", None),
+        delivery_options=_dlq_delivery_options(message, payload, queue=queue),
     )
     if delete_after_requeue:
         qstash_client.dlq.delete(dlq_id)

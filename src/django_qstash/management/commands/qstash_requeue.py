@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from django.core.management.base import BaseCommand
+from django.core.management.base import CommandError
 from django.core.management.base import CommandParser
 
 from django_qstash.results.services import requeue_dlq_message
@@ -27,7 +28,10 @@ class Command(BaseCommand):
         )
         parser.add_argument(
             "--queue",
-            help="Optional QStash queue to enqueue the replacement message into",
+            help=(
+                "Queue for the replacement message. DLQ messages retain their "
+                "original queue by default; pass an empty string for direct delivery."
+            ),
         )
         parser.add_argument(
             "--force",
@@ -51,12 +55,9 @@ class Command(BaseCommand):
             if value
         ]
         if len(identifiers) != 1:
-            self.stdout.write(
-                self.style.ERROR(
-                    "Specify exactly one of --result-id, --task-id, or --dlq-id"
-                )
+            raise CommandError(
+                "Specify exactly one of --result-id, --task-id, or --dlq-id"
             )
-            return
 
         try:
             if options.get("dlq_id"):
@@ -72,8 +73,7 @@ class Command(BaseCommand):
                     force=options["force"],
                 )
         except Exception as e:
-            self.stdout.write(self.style.ERROR(f"An error occurred: {str(e)}"))
-            return
+            raise CommandError(f"Failed to requeue task: {e}") from e
 
         self.stdout.write(
             self.style.SUCCESS(

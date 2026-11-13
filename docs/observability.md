@@ -42,7 +42,11 @@ Each task execution keeps a per-message `task_id` and a stable root
 
 This means a task lifecycle is queryable even when QStash assigns a new message
 id to a retry or linked task. `AsyncResult` for the original retrying message can
-follow the lineage to the terminal retry result for the same task function.
+follow the explicit `retry_task_id` links in `RETRY` results to the terminal
+attempt, while retaining its original id. Available function, correlation, and
+parent metadata are checked; sharing a correlation id alone does not make a
+linked task a replacement. A missing replacement result or an unusable retry
+link leaves the handle in `RETRY`.
 
 ## Metrics
 
@@ -87,8 +91,26 @@ python manage.py qstash_dlq --requeue <dlq-id>
 python manage.py qstash_requeue --dlq-id <dlq-id> --delete-dlq
 ```
 
+DLQ recovery preserves the original queue, method, forwarded headers, callback
+URLs and headers, retry settings, label, and flow control for direct delivery.
+To use another queue, pass `--queue recovery`; to switch to direct delivery,
+pass `--queue ""`. Queued deliveries use the queue's flow-control settings.
+
+The SDK does not return DLQ timeout or redaction settings. These are restored
+only when recorded in the task body's `options`; per-call values absent from
+that body cannot be reconstructed. Recovery starts a fresh delivery without
+reusing the original delay, `not_before`, or deduplication settings. Recovery
+from a `TaskResult` has only the stored task arguments and lineage; select a
+queue explicitly when needed.
+
+The recovered DLQ message uses the failed message id as `parent_task_id` and
+keeps the root correlation id. Its `retries` and `attempt` payload counters
+both advance from the highest previously recorded value.
+
 Use `--delete-dlq` or `--delete-after-requeue` only when you want the original
 DLQ entry removed after the replacement message is accepted by QStash.
+Both recovery commands report failures on stderr and exit nonzero, so scripts
+can distinguish a failed recovery from a successful enqueue.
 
 ## Logs And Signals
 

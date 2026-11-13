@@ -281,9 +281,9 @@ exactly like `.delay()`. It always uses the default database. It has no
 | `robust` | `bool` | `False` | Passed to `transaction.on_commit`; see [Publish failures](#publish-failures-after-commit) |
 | `**options` | | `{}` | Anything `.apply_async()` accepts: `countdown`, `eta`, `link`, `queue`, and QStash message options |
 
-Arguments and options are captured when you call the method (the containers
-are copied), so mutating your own `args` list or `kwargs` dict afterwards does
-not change what is published.
+Arguments and options are deep-copied when you call the method, including
+nested lists/dictionaries, delivery headers, and link signatures. Mutating
+these values afterwards does not change what is published at commit.
 
 #### Returns
 
@@ -552,8 +552,8 @@ def retry(
   id) and the current delivery is acked `200` with a `RETRY` status, so QStash
   does not also auto-retry it. In [eager mode](#testing-tasks-eager-mode) (and
   `.apply()`) the body simply re-runs inline and `countdown` / `eta` are ignored.
-- Because the retried run is a new message, the `AsyncResult` from the original
-  `.delay()` does not follow it. See
+- The `AsyncResult` from the original `.delay()` retains its id and follows
+  explicit retry-message links in the results backend. See
   [Celery Compatibility](celery-compatibility.md) for the full note.
 
 ---
@@ -652,8 +652,16 @@ run. Results are **eventually consistent**: until the webhook executes the task,
 the status is `PENDING`.
 
 When a bound task calls `self.retry()`, QStash assigns a new message id. The
-original `AsyncResult` follows the stored `correlation_id` to the terminal retry
-row for the same task function.
+original `AsyncResult` follows the explicit `retry_task_id` stored in each
+`RETRY` result to the replacement message, checking the available function,
+correlation, and parent metadata. The handle's `id` / `task_id` remains the
+original message id; its status, result, and traceback reflect the reached
+attempt. Linked tasks sharing the correlation id do not substitute results.
+
+While the replacement has no stored result, the handle remains `RETRY`.
+Legacy rows without a retry-message link, conflicting metadata, malformed
+links, and cycles also remain nonterminal; use a timeout with `.get()` when
+the result may be unavailable.
 
 If `django_qstash.results` is not installed, the status is always `PENDING` and
 `.get()` will time out.
@@ -1098,7 +1106,7 @@ python manage.py qstash_reconcile_schedules --specs myapp.schedules.SCHEDULES --
 |--------|-------------|
 | `--specs` | Dotted path to a list (or zero-arg callable) of specs; defaults to `DJANGO_QSTASH_SCHEDULE_SPECS` |
 | `--namespace` | Per-environment id prefix; defaults to `DJANGO_QSTASH_SCHEDULE_NAMESPACE` |
-| `--dry-run` | Report created/changed/resynced/unchanged without writing anything |
+| `--dry-run` | Validate specs and report planned actions or failures without writing anything |
 | `--resync` | Push every spec to QStash even when no drift is detected |
 | `--json` | Print the machine-readable result |
 
@@ -1108,7 +1116,7 @@ Exits nonzero when configuration is invalid or any entry fails.
 
 ### `qstash_dlq`
 
-List, inspect, and delete QStash dead letter queue messages.
+List, inspect, requeue, and delete QStash dead letter queue messages.
 
 ```bash
 python manage.py qstash_dlq --list
@@ -1120,6 +1128,8 @@ python manage.py qstash_dlq --list
 |--------|-------------|
 | `--list` | List DLQ messages |
 | `--get <dlq_id>` | Fetch one DLQ message |
+| `--requeue <dlq_id>` | Requeue a message with its original queue and available delivery controls |
+| `--delete-after-requeue` | Delete the original DLQ entry after a successful requeue |
 | `--delete <dlq_id>` | Delete one DLQ message |
 | `--delete-many <dlq_id> [<dlq_id> ...]` | Delete multiple DLQ messages |
 | `--count <n>` | Maximum number of DLQ messages to list |
@@ -1131,6 +1141,10 @@ python manage.py qstash_dlq --list
 | `--schedule-id <schedule_id>` | Filter by schedule ID |
 | `--response-status <status>` | Filter by final HTTP response status |
 | `--label <label>` | Filter by QStash label |
+
+Errors exit nonzero and go to stderr, including a missing action or a failed
+QStash operation. `--queue` is a list filter here; use `qstash_requeue` to
+override the queue during recovery.
 
 **Examples:**
 
@@ -1144,10 +1158,38 @@ python manage.py qstash_dlq --list --queue emails --label scheduled,email
 # Inspect one failed delivery
 python manage.py qstash_dlq --get dlq_abc123
 
+# Requeue a failed delivery using its original delivery controls
+python manage.py qstash_dlq --requeue dlq_abc123
+
 # Delete DLQ entries after triage
 python manage.py qstash_dlq --delete dlq_abc123
 python manage.py qstash_dlq --delete-many dlq_abc123 dlq_def456
 ```
+
+See [Recovery](observability.md#recovery) for preserved delivery settings and
+the timeout/redaction limitations of DLQ recovery.
+
+---
+
+### `qstash_requeue`
+
+Requeue a failed `TaskResult` or a QStash DLQ message as a new message. Supply
+exactly one identifier:
+
+| Option | Description |
+|--------|-------------|
+| `--result-id <uuid>` | Requeue a `TaskResult` by primary key |
+| `--task-id <message_id>` | Requeue the latest `TaskResult` for a QStash message id |
+| `--dlq-id <dlq_id>` | Requeue a QStash DLQ entry |
+| `--queue <name>` | Select a replacement queue; DLQ recovery retains its original queue when omitted; `--queue ""` selects direct delivery |
+| `--force` | Allow requeueing a non-failed `TaskResult` |
+| `--delete-dlq` | Delete the DLQ entry after QStash accepts the replacement |
+
+`TaskResult` recovery requires `django_qstash.results`. Invalid identifiers,
+missing results, and provider failures exit nonzero with an error on stderr.
+Successful recovery prints the new message id and correlation id.
+
+See [Recovery](observability.md#recovery) for examples and delivery semantics.
 
 ---
 
@@ -1209,19 +1251,27 @@ therefore converges on the next run while keeping the schedule id. Headers,
 callbacks, and flow control are not compared remotely; pass `resync=True`
 (`--resync`) to push everything after editing those directly in QStash.
 
+**Retrying failed updates.** Reconciled payloads contain a fingerprint of all
+spec-controlled fields. This records which specification reached QStash, so a
+rerun detects a failed update even when the changed field is not otherwise
+returned by QStash, such as redaction. The fingerprint does not embed header
+or callback values in the payload. Schedules created by earlier versions are
+resynced once to add this metadata, keeping their existing ids.
+
 **Result.** `reconcile_schedules` returns a `ReconcileResult` and does not raise
 for per-entry failures. Each `ScheduleOutcome` has `key`, `schedule_id`,
 `action` (`created`, `changed`, `resynced`, `unchanged`, `failed`), `changes`
 (`{field: [old, new]}`), `remote_drift` (reasons QStash needed a push),
 `error`, and `local_saved`. `result.to_dict()` is JSON-serializable.
-`dry_run=True` computes the same result without writing.
+`dry_run=True` validates the desired model fields and reports planned actions
+or validation failures without writing.
 
 **Failure semantics.** The local row is saved first (validated with
 `full_clean()`, without triggering the `post_save` QStash sync), then QStash is
 updated. These are separate operations; the database transaction does not make
 the QStash call atomic.
 
-- Local save fails: nothing is sent to QStash; the entry is `failed` with
+- Validation or local save fails: nothing is sent to QStash; the entry is `failed` with
   `local_saved=False`.
 - QStash call fails after the local save: the entry is `failed` with
   `local_saved=True`. The next run sees the local row is current, detects the

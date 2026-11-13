@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 from django.utils import timezone
 
 from django_qstash.db.models import TaskStatus
+from django_qstash.handlers import TaskPayload
 from django_qstash.results.services import build_dlq_requeue_payload
 from django_qstash.results.services import build_requeue_payload
 from django_qstash.results.services import calculate_task_metrics
@@ -306,6 +309,68 @@ class TestRequeueDlqMessage:
         assert payload["correlation_id"] == "dlq-msg"
         assert payload["parent_task_id"] == "dlq-msg"
         assert payload["attempt"] == 3
+
+    @pytest.mark.parametrize(
+        ("counters", "expected"),
+        [
+            ({}, 1),
+            ({"retries": 3}, 4),
+            ({"attempt": 2}, 3),
+            ({"retries": 3, "attempt": 1}, 4),
+            ({"retries": 1, "attempt": 3}, 4),
+            ({"retries": 0, "attempt": 3}, 4),
+            ({"retries": None, "attempt": 3}, 4),
+        ],
+    )
+    @pytest.mark.parametrize("json_body", [False, True])
+    def test_requeue_advances_both_retry_counters(self, counters, expected, json_body):
+        original = {
+            "function": "send",
+            "module": "emails.tasks",
+            "args": ["recipient@example.com"],
+            "kwargs": {},
+            "correlation_id": "root-message",
+            "parent_task_id": "prior-message",
+            **counters,
+        }
+        before = json.dumps(original, sort_keys=True)
+        message = SimpleNamespace(
+            message_id="failed-message",
+            body=json.dumps(original) if json_body else original,
+        )
+
+        payload = build_dlq_requeue_payload(message)
+        parsed = TaskPayload.from_dict(payload)
+
+        assert payload["attempt"] == expected
+        assert payload["retries"] == expected
+        assert parsed.retries == expected
+        assert parsed.correlation_id == "root-message"
+        assert parsed.parent_task_id == "failed-message"
+        assert json.dumps(original, sort_keys=True) == before
+        assert payload is not original
+
+    def test_requeue_repeatedly_tracks_immediate_parent(self):
+        message = SimpleNamespace(
+            message_id="failed-first",
+            body={
+                "function": "send",
+                "module": "emails.tasks",
+                "args": [],
+                "kwargs": {},
+                "retries": 2,
+            },
+        )
+        first = build_dlq_requeue_payload(message)
+        second = build_dlq_requeue_payload(
+            SimpleNamespace(message_id="failed-second", body=first)
+        )
+
+        assert first["parent_task_id"] == "failed-first"
+        assert first["attempt"] == 3
+        assert second["parent_task_id"] == "failed-second"
+        assert second["correlation_id"] == "failed-first"
+        assert second["attempt"] == second["retries"] == 4
 
     def test_build_dlq_requeue_payload_accepts_bytes_body(self):
         message = type(

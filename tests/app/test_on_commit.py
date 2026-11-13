@@ -232,6 +232,82 @@ def test_arguments_captured_at_call_time(mock_qstash_client):
     assert second.kwargs["body"]["kwargs"] == {"y": 2}
 
 
+@pytest.mark.parametrize("method", ["delay_on_commit", "apply_async_on_commit"])
+def test_nested_arguments_captured_at_call_time(mock_qstash_client, method):
+    payload = {"items": [1]}
+    metadata = {"labels": ["original"]}
+    with transaction.atomic():
+        if method == "delay_on_commit":
+            add.delay_on_commit(payload, y=metadata)
+        else:
+            add.apply_async_on_commit(args=(payload,), kwargs={"y": metadata})
+        payload["items"].append(2)
+        metadata["labels"][0] = "changed"
+    body = _published_bodies(mock_qstash_client)[0]
+    assert body["args"] == ({"items": [1]},)
+    assert body["kwargs"] == {"y": {"labels": ["original"]}}
+
+
+def test_delivery_options_captured_at_call_time(mock_qstash_client):
+    headers = {"X-Group": "original"}
+    callback_headers = {"X-Callback": "original"}
+    flow_control = {"key": "original", "parallelism": 1}
+    with transaction.atomic():
+        add.apply_async_on_commit(
+            args=(1, 2),
+            headers=headers,
+            callback_headers=callback_headers,
+            flow_control=flow_control,
+        )
+        headers["X-Group"] = "changed"
+        callback_headers.clear()
+        flow_control["parallelism"] = 99
+    sent = mock_qstash_client.message.publish_json.call_args.kwargs
+    assert sent["headers"] == {"X-Group": "original"}
+    assert sent["callback_headers"] == {"X-Callback": "original"}
+    assert sent["flow_control"] == {"key": "original", "parallelism": 1}
+
+
+def test_link_signatures_captured_at_call_time(mock_qstash_client):
+    signature = add.s({"items": [1]}, y={"labels": ["original"]})
+    signature.options["headers"] = {"X-Group": "original"}
+    links = [signature]
+    with transaction.atomic():
+        add.apply_async_on_commit(args=(1, 2), link=links)
+        signature.args[0]["items"].append(2)
+        signature.kwargs["y"]["labels"].clear()
+        signature.options["headers"]["X-Group"] = "changed"
+        signature.function = "different_task"
+        links.append(add.s(3, 4))
+    assert _published_bodies(mock_qstash_client)[0]["on_success"] == [
+        {
+            "function": "add",
+            "module": __name__,
+            "args": [{"items": [1]}],
+            "kwargs": {"y": {"labels": ["original"]}},
+            "options": {"headers": {"X-Group": "original"}},
+        }
+    ]
+
+
+@override_settings(DJANGO_QSTASH_ALWAYS_EAGER=True)
+def test_eager_execution_uses_captured_nested_arguments(mock_qstash_client):
+    calls = []
+
+    @stashed_task
+    def capture(payload):
+        calls.append(payload)
+
+    payload = {"items": [1]}
+    with transaction.atomic():
+        capture.delay_on_commit(payload)
+        capture.apply_async_on_commit(args=(payload,))
+        payload["items"].append(2)
+        assert calls == []
+    assert calls == [{"items": [1]}, {"items": [1]}]
+    mock_qstash_client.message.publish_json.assert_not_called()
+
+
 @pytest.mark.django_db
 def test_with_django_capture_on_commit_callbacks(
     mock_qstash_client, django_capture_on_commit_callbacks

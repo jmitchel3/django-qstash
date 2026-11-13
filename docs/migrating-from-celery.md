@@ -137,7 +137,8 @@ What is the same as Celery:
 What differs (see [Compatibility](celery-compatibility.md) for the full note):
 
 - A live retry publishes a *new* QStash message, so it gets a new message id. The
-  `AsyncResult` from your original `.delay()` does not follow the retried run.
+  `AsyncResult` from your original `.delay()` keeps its id and follows explicit
+  retry-message links in the results backend to the replacement result.
 - The current delivery is acked (HTTP 200) and recorded with a `RETRY` status so
   QStash does not *also* auto-retry it (which would double-run the task).
 

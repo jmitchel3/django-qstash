@@ -7,6 +7,7 @@ import time
 import traceback as traceback_module
 import uuid
 from collections.abc import Callable
+from copy import deepcopy
 from datetime import datetime
 from datetime import timezone
 from functools import partial
@@ -752,8 +753,7 @@ class QStashTask(Generic[R]):
         keyword arguments belong to the task; to target another database alias
         use :meth:`apply_async_on_commit` with ``using=``.
         """
-        captured_args = tuple(args)
-        captured_kwargs = dict(kwargs)
+        captured_args, captured_kwargs = deepcopy((args, kwargs))
         self._on_commit(
             lambda: self.delay(*captured_args, **captured_kwargs),
             method="delay_on_commit",
@@ -786,9 +786,9 @@ class QStashTask(Generic[R]):
 
         Returns ``None`` because the QStash message id is unknown until commit.
         """
-        captured_args = tuple(args or ())
-        captured_kwargs = dict(kwargs or {})
-        captured_options = dict(options)
+        captured_args, captured_kwargs, captured_options = deepcopy(
+            (tuple(args or ()), kwargs or {}, options)
+        )
         self._on_commit(
             lambda: self.apply_async(
                 args=captured_args, kwargs=captured_kwargs, **captured_options
@@ -862,8 +862,10 @@ class AsyncResult:
     QStash message id (``task_id``) to expose ``status``/``state``, ``result``,
     and a polling ``get()``. Results are eventually consistent: a row only
     exists once the webhook has executed the task, so ``status`` is ``PENDING``
-    until then. If ``django_qstash.results`` is not installed, every lookup
-    resolves to ``PENDING`` and ``get()`` will time out.
+    until then. A ``RETRY`` row's explicit ``retry_task_id`` link follows the
+    replacement message without changing this handle's original id. If
+    ``django_qstash.results`` is not installed, every lookup resolves to
+    ``PENDING`` and ``get()`` will time out.
     """
 
     def __init__(self, task_id: str, *, correlation_id: str = ""):
@@ -875,16 +877,54 @@ class AsyncResult:
         return self.task_id
 
     def _row(self) -> Any:
-        """Return the most recent TaskResult row for this task_id, or None."""
+        """Return the latest result reached through this task's retry links.
+
+        Correlation ids also group success-linked tasks, so they cannot alone
+        identify a replacement result. Follow only explicit retry message ids,
+        validating the available lineage and stopping at missing or malformed
+        links. A pending replacement leaves the last ``RETRY`` row visible.
+        """
         try:
             TaskResult = apps.get_model("django_qstash_results", "TaskResult")
         except LookupError:
             return None
-        return (
+        row = (
             TaskResult.objects.filter(task_id=self.task_id)
             .order_by("-date_done", "-date_created")
             .first()
         )
+        if row is None:
+            return None
+
+        function_path = row.function_path
+        correlation_id = row.correlation_id or self.correlation_id
+        seen = {self.task_id}
+        while row.status == TaskStatus.RETRY and isinstance(row.result, dict):
+            retry_task_id = row.result.get("retry_task_id")
+            if (
+                not isinstance(retry_task_id, str)
+                or not retry_task_id
+                or retry_task_id in seen
+            ):
+                break
+            seen.add(retry_task_id)
+            replacement = (
+                TaskResult.objects.filter(task_id=retry_task_id)
+                .order_by("-date_done", "-date_created")
+                .first()
+            )
+            if replacement is None:
+                break
+            if function_path and replacement.function_path != function_path:
+                break
+            if correlation_id and replacement.correlation_id != correlation_id:
+                break
+            if replacement.parent_task_id and replacement.parent_task_id != row.task_id:
+                break
+            function_path = function_path or replacement.function_path
+            correlation_id = correlation_id or replacement.correlation_id
+            row = replacement
+        return row
 
     @property
     def status(self) -> str:

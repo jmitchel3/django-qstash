@@ -90,8 +90,10 @@ Celery user should know about.
   delivery.
 - **`self.retry()` re-enqueues a new message.** In Celery `self.retry()` keeps
   the same task id. Here a live retry publishes a fresh QStash message (a new
-  message id), so the `AsyncResult` you got from the original `.delay()` does not
-  follow the retried run. The current delivery is recorded with a `RETRY` status
+  message id). The original `AsyncResult` keeps its id and follows explicit
+  retry-message links in the results backend to the replacement's status and
+  result. A replacement without a stored result leaves the handle in `RETRY`.
+  The current delivery is recorded with a `RETRY` status
   and acked (HTTP 200) so QStash does not also auto-retry it, which would run the
   task twice. The attempt count rides the message payload, so the next run sees
   the correct `self.request.retries`. `countdown` / `eta` schedule the delay

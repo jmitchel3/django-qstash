@@ -26,6 +26,7 @@ class FakeScheduleApi:
     def __init__(self) -> None:
         self.store: dict[str, SimpleNamespace] = {}
         self.calls: list[tuple[str, str]] = []
+        self.requests: list[dict] = []
         self.fail_create = False
         self.fail_list = False
 
@@ -39,6 +40,7 @@ class FakeScheduleApi:
             raise RuntimeError("provider down")
         schedule_id = data["schedule_id"]
         self.calls.append(("create", schedule_id))
+        self.requests.append(data)
         existing = self.store.get(schedule_id)
         self.store[schedule_id] = SimpleNamespace(
             schedule_id=schedule_id,
@@ -178,6 +180,96 @@ class TestReconcile:
         assert repaired.outcomes[0].remote_drift == ["missing in QStash"]
         assert "prod.nightly-report" in qstash.store
 
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("headers", {"Authorization": "Bearer private-test-token"}),
+            ("callback", "https://callback.example.com/done"),
+            ("callback_headers", {"X-Token": "private-callback-token"}),
+            ("failure_callback", "https://callback.example.com/failed"),
+            ("failure_callback_headers", {"X-Token": "private-failure-token"}),
+            ("flow_control", {"key": "reports", "parallelism": 2}),
+            ("redact", {"body": True}),
+        ],
+    )
+    @pytest.mark.parametrize("remove_option", [False, True])
+    def test_failed_delivery_option_update_is_repaired(
+        self, qstash, field, value, remove_option
+    ):
+        original = specs(**{field: value}) if remove_option else specs()
+        desired = specs() if remove_option else specs(**{field: value})
+        assert reconcile_schedules(original, namespace="prod").ok
+        old_body = qstash.store["prod.nightly-report"].body
+
+        qstash.fail_create = True
+        failed = reconcile_schedules(desired, namespace="prod")
+        assert not failed.ok
+        assert failed.outcomes[0].local_saved
+        assert qstash.store["prod.nightly-report"].body == old_body
+
+        qstash.fail_create = False
+        repaired = reconcile_schedules(desired, namespace="prod")
+        assert repaired.outcomes[0].action == "resynced"
+        assert repaired.outcomes[0].remote_drift == ["payload"]
+        if remove_option:
+            assert field not in qstash.requests[-1]
+        else:
+            assert qstash.requests[-1][field] == value
+        new_body = qstash.store["prod.nightly-report"].body
+        assert new_body != old_body
+        assert "private-" not in new_body
+        assert reconcile_schedules(desired, namespace="prod").counts()["unchanged"] == 1
+        assert len(qstash.requests) == 2
+
+    def test_legacy_payload_gets_one_resync(self, qstash):
+        reconcile_schedules(specs(), namespace="prod")
+        remote = qstash.store["prod.nightly-report"]
+        body = json.loads(remote.body)
+        body.pop("_qstash_schedule_spec")
+        remote.body = json.dumps(body)
+
+        result = reconcile_schedules(specs(), namespace="prod")
+        assert result.outcomes[0].action == "resynced"
+        assert result.outcomes[0].remote_drift == ["payload"]
+        assert reconcile_schedules(specs(), namespace="prod").counts()["unchanged"] == 1
+        assert len(qstash.requests) == 2
+
+    def test_fingerprint_is_independent_of_mapping_order(self, qstash):
+        reconcile_schedules(
+            specs(headers={"X-First": "one", "X-Second": "two"}), namespace="prod"
+        )
+        result = reconcile_schedules(
+            specs(headers={"X-Second": "two", "X-First": "one"}), namespace="prod"
+        )
+        assert result.counts()["unchanged"] == 1
+        assert len(qstash.requests) == 1
+
+    def test_fingerprint_normalizes_json_object_keys(self, qstash):
+        desired = specs(args=[{1: "one", "x": "two"}])
+        assert reconcile_schedules(desired, namespace="prod").counts()["created"] == 1
+        payload = json.loads(qstash.store["prod.nightly-report"].body)
+        assert payload["args"] == [{"1": "one", "x": "two"}]
+        assert reconcile_schedules(desired, namespace="prod").counts()["unchanged"] == 1
+        assert len(qstash.requests) == 1
+
+    def test_changed_task_payload_converges(self, qstash):
+        reconcile_schedules(specs(), namespace="prod")
+        changed = specs(task="reports.tasks.weekly")
+        assert reconcile_schedules(changed, namespace="prod").counts()["changed"] == 1
+        payload = json.loads(qstash.store["prod.nightly-report"].body)
+        assert (payload["module"], payload["function"]) == ("reports.tasks", "weekly")
+        assert reconcile_schedules(changed, namespace="prod").counts()["unchanged"] == 1
+
+    def test_reconciled_payload_is_webhook_compatible(self, qstash):
+        from django_qstash.handlers import TaskPayload
+
+        reconcile_schedules(specs(), namespace="prod")
+        body = json.loads(qstash.store["prod.nightly-report"].body)
+        payload = TaskPayload.from_dict(body)
+        assert payload.function_path == "reports.tasks.nightly"
+        assert payload.args == []
+        assert payload.kwargs == {"full": True}
+
     def test_remote_payload_drift_is_repaired(self, qstash):
         reconcile_schedules(specs(), namespace="prod")
         qstash.store["prod.nightly-report"].body = json.dumps({"tampered": True})
@@ -191,7 +283,7 @@ class TestReconcile:
         result = reconcile_schedules(specs(cron="not a cron"), namespace="prod")
         assert result.outcomes[0].action == "failed"
         assert result.outcomes[0].local_saved is False
-        assert "local save failed" in result.outcomes[0].error
+        assert "local validation failed" in result.outcomes[0].error
         assert TaskSchedule.objects.count() == 0
         assert qstash.calls == []
 
@@ -250,6 +342,32 @@ class TestReconcile:
         assert result.outcomes[0].action == "created"
         assert TaskSchedule.objects.count() == 0
         assert qstash.calls == []
+
+    @pytest.mark.parametrize(
+        "invalid",
+        [
+            {"cron": "not a cron"},
+            {"timeout": "invalid"},
+            {"retries": 6},
+            {"callback": "not-a-url"},
+        ],
+    )
+    @pytest.mark.parametrize("existing", [False, True])
+    def test_dry_run_validates_like_apply(self, qstash, invalid, existing):
+        if existing:
+            reconcile_schedules(specs(), namespace="prod")
+        calls_before = list(qstash.calls)
+        rows_before = list(TaskSchedule.objects.values())
+
+        dry = reconcile_schedules(specs(**invalid), namespace="prod", dry_run=True)
+        applied = reconcile_schedules(specs(**invalid), namespace="prod")
+
+        assert not dry.ok
+        assert dry.outcomes[0].action == "failed"
+        assert not dry.outcomes[0].local_saved
+        assert dry.outcomes[0].error == applied.outcomes[0].error
+        assert list(TaskSchedule.objects.values()) == rows_before
+        assert qstash.calls == calls_before
 
     def test_forced_resync(self, qstash):
         reconcile_schedules(specs(), namespace="prod")
