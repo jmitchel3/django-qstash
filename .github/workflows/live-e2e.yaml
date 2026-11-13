@@ -2,7 +2,8 @@ name: Live e2e
 
 # Round trip against real Upstash QStash: enqueue a task, QStash calls the
 # webhook through a temporary Cloudflare quick tunnel, the result is stored.
-# Runs on demand and on release tags (each run spends QStash messages).
+# Runs on demand, on PRs touching this file, and from CI's release path
+# (main.yaml calls it via workflow_call; release needs it to pass).
 # Secrets are synced from Doppler (project "dev", config "prd").
 
 on:
@@ -10,13 +11,7 @@ on:
   pull_request:
     paths:
       - '.github/workflows/live-e2e.yaml'
-  push:
-    tags:
-      - '**'
-
-concurrency:
-  group: live-e2e
-  cancel-in-progress: false
+  workflow_call:
 
 env:
   CLOUDFLARED_VERSION: '2026.10.3'
@@ -27,6 +22,9 @@ jobs:
     name: Real QStash round trip
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    concurrency:
+      group: live-e2e
+      cancel-in-progress: false
     defaults:
       run:
         working-directory: sample_project
@@ -81,23 +79,36 @@ jobs:
 
       - name: Start quick tunnel
         id: tunnel
-        timeout-minutes: 3
+        timeout-minutes: 8
         run: |
-          nohup cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:${PORT}" \
-            > "$RUNNER_TEMP/cloudflared.log" 2>&1 &
-          url=""
-          for i in $(seq 1 60); do
-            url=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$RUNNER_TEMP/cloudflared.log" | head -1 || true)
-            [ -n "$url" ] && break
-            sleep 1
+          # Quick tunnels are best-effort, so retry with a fresh tunnel.
+          start_tunnel() {
+            pkill cloudflared || true
+            nohup cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:${PORT}" \
+              >> "$RUNNER_TEMP/cloudflared.log" 2>&1 &
+            local u=""
+            for i in $(seq 1 60); do
+              u=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$RUNNER_TEMP/cloudflared.log" | tail -1 || true)
+              [ -n "$u" ] && [ "$u" != "$1" ] && break
+              u=""
+              sleep 1
+            done
+            [ -n "$u" ] || return 1
+            # New quick-tunnel hostnames take a few seconds to resolve publicly.
+            for i in $(seq 1 45); do
+              curl -fsS -o /dev/null "$u/admin/login/" && { echo "$u"; return 0; }
+              sleep 2
+            done
+            return 1
+          }
+          url=""; prev=""
+          for attempt in 1 2 3; do
+            url=$(start_tunnel "$prev") && break
+            echo "Tunnel attempt $attempt failed"
+            prev=$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$RUNNER_TEMP/cloudflared.log" | tail -1 || true)
+            url=""
           done
-          [ -n "$url" ] || { echo "No tunnel URL"; cat "$RUNNER_TEMP/cloudflared.log"; exit 1; }
-          # New quick-tunnel hostnames take a few seconds to resolve publicly.
-          for i in $(seq 1 90); do
-            curl -fsS -o /dev/null "$url/admin/login/" && break
-            sleep 2
-          done
-          curl -fsS -o /dev/null "$url/admin/login/"
+          [ -n "$url" ] || { echo "No working tunnel"; cat "$RUNNER_TEMP/cloudflared.log"; exit 1; }
           echo "url=$url" >> "$GITHUB_OUTPUT"
           echo "Tunnel: $url"
 
