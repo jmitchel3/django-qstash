@@ -119,8 +119,16 @@ class Command(BaseCommand):
                     "failure_callback_headers",
                     "flow_control",
                 ):
+                    echoed = actual[field]
+                    if field in ("callback_headers", "failure_callback_headers"):
+                        # QStash echoes callback configuration headers with an
+                        # Upstash- prefix; the SDK adds it when sending them.
+                        echoed = {
+                            key.removeprefix("Upstash-"): value
+                            for key, value in echoed.items()
+                        }
                     self.require(
-                        actual[field] == getattr(desired, field),
+                        echoed == getattr(desired, field),
                         f"remote {field} mismatch: {actual[field]!r}",
                     )
             self.require(
