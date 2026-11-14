@@ -272,6 +272,12 @@ def _remote_body(remote: Any) -> dict[str, Any]:
     return body if isinstance(body, dict) else {}
 
 
+def _redacted_body_matches(raw: Any, payload: dict[str, Any]) -> bool:
+    # QStash hashes the exact bytes sent, including JSON whitespace/key order.
+    digest = hashlib.sha256(json.dumps(payload).encode()).hexdigest()
+    return bool(raw == f"REDACTED:{digest}")
+
+
 def _validate_bindings(
     planned: list[tuple[ScheduleSpec, str]],
     remote_by_id: dict[str, Any],
@@ -319,6 +325,23 @@ def _validate_bindings(
         if SCHEDULE_OWNER_KEY in body and body[SCHEDULE_OWNER_KEY] != owner:
             raise ValueError(f"Schedule {schedule_id!r} has a conflicting remote owner")
         if spec.existing_schedule_id is None:
+            # A redacted body hides its owner. Without a local binding we cannot
+            # prove a new deterministic ID would not duplicate that existing job.
+            for remote_id, entry in remote_by_id.items():
+                if (
+                    remote_id != schedule_id
+                    and getattr(entry, "destination", None) == destination
+                    and str(getattr(entry, "body", "")).startswith("REDACTED:")
+                    and not TaskSchedule.objects.filter(
+                        schedule_id=remote_id,
+                        reconciliation_namespace__isnull=False,
+                        reconciliation_key__isnull=False,
+                    ).exists()
+                ):
+                    raise ValueError(
+                        f"Ambiguous redacted schedule {remote_id!r}; restore its "
+                        "local ownership binding or explicitly adopt it first"
+                    )
             continue
         deterministic_id = schedule_id_for(namespace, spec.key)
         if (
@@ -342,7 +365,12 @@ def _validate_bindings(
         if body.get(SCHEDULE_OWNER_KEY) != owner and local_owner != owner:
             task = _normalize_task_reference(spec.task)
             remote_task = f"{body.get('module', '')}.{body.get('function', '')}"
-            if remote_task != task or (local is not None and local.task != task):
+            verified_legacy_body = local is not None and _redacted_body_matches(
+                getattr(remote, "body", None), prepare_qstash_payload(local)
+            )
+            if (remote_task != task and not verified_legacy_body) or (
+                local is not None and local.task != task
+            ):
                 raise ValueError(
                     f"Schedule {schedule_id!r} task does not match the declaration; "
                     "adopt the existing task before changing it"
@@ -365,7 +393,10 @@ def _remote_drift(remote: Any, instance: TaskSchedule, destination: str) -> list
         body = json.loads(getattr(remote, "body", None) or "")
     except (TypeError, ValueError):
         body = None
-    if body != _jsonable(_reconciled_payload(instance)):
+    payload = _reconciled_payload(instance)
+    if body != _jsonable(payload) and not _redacted_body_matches(
+        getattr(remote, "body", None), payload
+    ):
         drift.append("payload")
     if bool(getattr(remote, "paused", False)) != (not instance.is_active):
         drift.append("paused" if instance.is_active else "active")

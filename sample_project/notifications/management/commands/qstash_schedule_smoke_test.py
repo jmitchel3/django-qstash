@@ -107,7 +107,10 @@ class Command(BaseCommand):
                     "schedule identity changed",
                 )
                 self.require(remote.paused, "schedule resumed unexpectedly")
-                actual = remote_schedule_to_fields(remote)
+                # Body redaction hides task metadata. Use the known original
+                # task body only to let the mapper inspect the echoed options;
+                # the reconciler already verified the real body's SHA256 above.
+                actual = remote_schedule_to_fields(replace(remote, body=original.body))
                 for field in (
                     "headers",
                     "callback",

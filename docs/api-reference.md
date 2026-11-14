@@ -1274,6 +1274,14 @@ deterministic schedule for the same key, and destination/task mismatches are
 rejected before **any** batch writes, including in dry runs. Ownership fields
 are maintained by reconciliation and are not editable in the admin.
 
+When QStash redacts a schedule body, reconciliation verifies its SHA256 against
+the exact payload it would send. Initial adoption of a redacted legacy schedule
+requires a local row whose original payload matches that hash. Keep backups of
+local ownership bindings: redaction also hides remote ownership metadata. An
+unbound redacted schedule at this environment's destination blocks creation of
+new deterministic IDs until it is explicitly adopted or its local binding is
+restored, preventing an ambiguous duplicate after database loss.
+
 **Environments.** The namespace (`namespace=` or
 `DJANGO_QSTASH_SCHEDULE_NAMESPACE`, required) keeps environments apart when
 they share a QStash account. Reconciliation reads the account's schedule list
@@ -1298,7 +1306,8 @@ moving another environment's existing schedule.
 spec-controlled fields. This records which specification reached QStash, so a
 rerun detects a failed update even when the changed field is not otherwise
 returned by QStash, such as redaction. The fingerprint does not embed header
-or callback values in the payload. Schedules created by earlier versions are
+or callback values in the payload. Redacted body hashes are compared too, so
+recovery remains idempotent when body redaction is enabled. Schedules created by earlier versions are
 resynced once to add this metadata, keeping their existing ids.
 
 **Result.** `reconcile_schedules` returns a `ReconcileResult` and does not raise

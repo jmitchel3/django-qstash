@@ -28,6 +28,13 @@ All notable changes to this project will be documented in this file.
 - Includes the transaction snapshot and delivery-option recovery fixes from
   0.9.2, with expanded regression coverage for adopted schedules and nested options.
 
+### Fixed
+
+- Compare QStash's `REDACTED:<SHA256>` body responses with the exact sent payload
+  so repairing a redacted schedule converges instead of resyncing forever. An
+  unbound redacted schedule at the same destination blocks ambiguous creation
+  of a new deterministic ID; legacy adoption requires the original local payload.
+
 ## [0.9.2] - 2026-11-13
 
 ### Fixed

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from io import StringIO
@@ -49,7 +50,11 @@ class FakeScheduleApi:
             schedule_id=schedule_id,
             destination=data["destination"],
             cron=data["cron"],
-            body=data["body"],
+            body=(
+                "REDACTED:" + hashlib.sha256(data["body"].encode()).hexdigest()
+                if data.get("redact", {}).get("body")
+                else data["body"]
+            ),
             retries=data["retries"],
             timeout=data["timeout"],
             paused=existing.paused if existing else False,
@@ -449,6 +454,33 @@ class TestReconcile:
         qstash.calls.clear()
         with pytest.raises(ValueError, match="missing schedule"):
             reconcile_schedules(declared, namespace="prod")
+        assert qstash.calls == []
+
+    def test_redacted_legacy_adoption_requires_original_local_payload(self, qstash):
+        seed_existing(qstash, redact={"body": True})
+        declared = specs(existing_schedule_id="scd_legacy", redact={"body": True})
+        assert reconcile_schedules(declared, namespace="prod").ok
+        assert (
+            reconcile_schedules(declared, namespace="prod").counts()["unchanged"] == 1
+        )
+        TaskSchedule.objects.all()._raw_delete("default")
+        qstash.calls.clear()
+        with pytest.raises(ValueError, match="Ambiguous redacted"):
+            reconcile_schedules(specs(redact={"body": True}), namespace="prod")
+        with pytest.raises(ValueError, match="task does not match"):
+            reconcile_schedules(declared, namespace="stage")
+        assert qstash.calls == []
+
+    def test_redacted_legacy_task_mismatch_is_not_adopted(self, qstash):
+        row = seed_existing(qstash, redact={"body": True})
+        TaskSchedule.objects.filter(pk=row.pk).update(
+            task="other.task", task_name="other.task"
+        )
+        with pytest.raises(ValueError, match="task does not match"):
+            reconcile_schedules(
+                specs(existing_schedule_id="scd_legacy", task="other.task"),
+                namespace="prod",
+            )
         assert qstash.calls == []
 
     def test_legacy_payload_gets_one_resync(self, qstash):
