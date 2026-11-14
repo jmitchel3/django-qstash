@@ -66,10 +66,10 @@ class Command(BaseCommand):
                 spec,
                 headers={"X-Smoke": "yes"},
                 callback=get_callback_url(),
-                callback_headers={"X-Smoke": "callback"},
+                callback_headers={"Forward-X-Smoke": "callback"},
                 failure_callback=get_callback_url(),
-                failure_callback_headers={"X-Smoke": "failure"},
-                flow_control={"key": namespace, "parallelism": 1},
+                failure_callback_headers={"Forward-X-Smoke": "failure"},
+                flow_control={"key": namespace, "parallelism": 1, "period": 1},
                 redact={"body": True},
             )
             # Exercise both setting and removing delivery options after a failed push.
