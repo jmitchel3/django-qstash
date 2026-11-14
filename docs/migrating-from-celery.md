@@ -182,6 +182,68 @@ Drop the `celery beat` process. Use `django_qstash.schedules`, which stores cron
 schedules in a `TaskSchedule` model and registers them with QStash Schedules. See
 [API Reference - TaskSchedule](api-reference.md#taskschedule-model).
 
+### Migrating existing QStash schedules to declarations
+
+Install `django-qstash>=0.10.0` and run `python manage.py migrate`. For each
+environment, inventory the local and remote IDs, destination URLs, task paths,
+cron expressions, arguments, and delivery options. Preserve existing callbacks
+and failure callbacks: declaration defaults replace omitted options.
+
+For example, RangerTrac's stage and production inventories use different
+provider-generated IDs for the same job. Supply an explicit per-environment map
+in settings (never choose schedules by display name):
+
+```python
+# Stage settings; use the production ID only in production settings.
+DJANGO_QSTASH_SCHEDULE_NAMESPACE = "rangertrac-stage"
+DJANGO_QSTASH_DOMAIN = "https://stage.rangertrac.org"
+QSTASH_EXISTING_SCHEDULE_IDS = {
+    "daily-adoption-metrics": "scd_6MwL9ApSDRJY1BzQDQR4acjhXuDV",
+}
+# Production counterpart:
+# namespace: rangertrac-production
+# domain: https://rangertrac.net
+# daily-adoption-metrics: scd_7QkSDHFpqdT8EbcJCUghaPaXENzi
+```
+
+```python
+# myapp/schedules.py
+from django.conf import settings
+
+from django_qstash.schedules.reconcile import ScheduleSpec
+
+SCHEDULES = [
+    ScheduleSpec(
+        key="daily-adoption-metrics",
+        existing_schedule_id=settings.QSTASH_EXISTING_SCHEDULE_IDS[
+            "daily-adoption-metrics"
+        ],
+        task="access.tasks.aggregate_adoption_metrics",
+        cron="45 4 * * *",
+        # Include inventoried args, kwargs, retries, timeout, headers, callbacks,
+        # flow control, redaction, and active state if they differ from defaults.
+    ),
+]
+```
+
+Use strict dictionary lookup for every existing job: a missing ID must fail
+instead of silently creating a new deterministic schedule. RangerTrac should
+map all 9 stage and 7 production IDs from its refreshed inventory before
+switching deploy steps; the single entry above illustrates the API.
+
+```bash
+python manage.py qstash_reconcile_schedules --specs myapp.schedules.SCHEDULES --dry-run --json
+python manage.py qstash_reconcile_schedules --specs myapp.schedules.SCHEDULES --json
+python manage.py qstash_reconcile_schedules --specs myapp.schedules.SCHEDULES --json
+```
+
+Review the dry run, apply once, then confirm the second live run is unchanged
+and the local/remote ID sets are identical to the inventory. Keep the mapping
+in future releases. An existing deterministic job for the same key, a different
+destination/task, or a conflicting ownership binding stops adoption before any
+writes. Omit `existing_schedule_id` only for new jobs. For full ownership and
+recovery rules, see [Schedule reconciliation](api-reference.md#schedule-reconciliation).
+
 ## Step 7: Results (replace your result backend)
 
 Install `django_qstash.results` to get a Celery-shaped `AsyncResult`:

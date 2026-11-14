@@ -7,6 +7,7 @@ from django_qstash.callbacks import get_callback_url
 from django_qstash.schedules.models import TaskSchedule
 
 JSON_CONTENT_TYPE = "application/json"
+SCHEDULE_OWNER_KEY = "_qstash_schedule_owner"
 
 
 def _compact_qstash_options(options: dict[str, Any]) -> dict[str, Any]:
@@ -34,7 +35,7 @@ def _task_options(instance: TaskSchedule) -> dict[str, Any]:
 
 def prepare_qstash_payload(instance: TaskSchedule) -> dict[str, Any]:
     """Prepare the task payload for QStash"""
-    return {
+    payload = {
         "function": instance.task_name.split(".")[-1],  # Get function name
         "module": ".".join(instance.task_name.split(".")[:-1]),  # Get module path
         "args": instance.args,
@@ -42,6 +43,12 @@ def prepare_qstash_payload(instance: TaskSchedule) -> dict[str, Any]:
         "task_name": instance.name,
         "options": _task_options(instance),
     }
+    if instance.reconciliation_namespace is not None:
+        payload[SCHEDULE_OWNER_KEY] = {
+            "namespace": instance.reconciliation_namespace,
+            "key": instance.reconciliation_key,
+        }
+    return payload
 
 
 def format_task_schedule_for_qstash(instance: TaskSchedule) -> dict[str, Any]:

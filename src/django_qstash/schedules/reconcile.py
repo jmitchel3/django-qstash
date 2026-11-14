@@ -9,8 +9,9 @@ local ``TaskSchedule`` rows and the QStash schedules toward those specs:
   ``"<namespace>.<key>"``, and django-qstash sets that id itself when creating
   the schedule, so repeated runs (and runs that crashed half way) update the
   same schedule instead of creating duplicates.
-* The namespace separates environments. Use a different namespace for stage
-  and production; a run only ever reads or writes ids in its own namespace.
+* Existing provider-generated ids can be explicitly adopted with
+  ``existing_schedule_id``. A matching destination/task and a persistent
+  namespace/key binding protect environment ownership without using names.
 * Nothing else is touched. Schedules that are not in ``specs`` are never
   updated, adopted, or deleted.
 
@@ -40,6 +41,7 @@ from django.db import transaction
 
 from django_qstash.callbacks import get_callback_url
 from django_qstash.client import qstash_client
+from django_qstash.schedules.formatters import SCHEDULE_OWNER_KEY
 from django_qstash.schedules.formatters import format_task_schedule_for_qstash
 from django_qstash.schedules.formatters import prepare_qstash_payload
 from django_qstash.schedules.models import TaskSchedule
@@ -52,6 +54,7 @@ logger = logging.getLogger(__name__)
 Action = Literal["created", "changed", "resynced", "unchanged", "failed"]
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
+_EXISTING_ID = re.compile(r"scd_[A-Za-z0-9_-]{1,251}")
 _SPEC_FINGERPRINT_KEY = "_qstash_schedule_spec"
 
 # TaskSchedule fields a spec controls, in the order they are compared.
@@ -84,7 +87,9 @@ class ScheduleSpec:
 
     ``key`` is the stable identity within a namespace (letters, digits, ``_``
     and ``-``). ``task`` is a dotted path or a ``@stashed_task`` function.
-    Every other field mirrors the ``TaskSchedule`` field of the same name and
+    ``existing_schedule_id`` explicitly binds this declaration to an existing
+    provider-generated ``scd_...`` id; omit it for a new deterministic id.
+    Every delivery field mirrors the ``TaskSchedule`` field of the same name and
     has the same default, so changing a default here (or in your spec) updates
     existing schedules on the next run.
     """
@@ -109,6 +114,7 @@ class ScheduleSpec:
     label: str = ""
     redact: dict[str, Any] = field(default_factory=dict)
     is_active: bool = True
+    existing_schedule_id: str | None = None
 
     @classmethod
     def coerce(cls, value: ScheduleSpec | Mapping[str, Any]) -> ScheduleSpec:
@@ -206,7 +212,7 @@ class ReconcileResult:
 def schedule_id_for(namespace: str, key: str) -> str:
     """Deterministic QStash schedule id for ``key`` in ``namespace``."""
     for label, value in (("namespace", namespace), ("key", key)):
-        if not _IDENTIFIER.match(str(value)):
+        if type(value) is not str or not _IDENTIFIER.fullmatch(value):
             raise ValueError(
                 f"Invalid schedule {label} {value!r}: use 1-100 letters, digits, "
                 "'_' or '-', starting with a letter or digit"
@@ -258,6 +264,119 @@ def _reconciled_payload(instance: TaskSchedule) -> dict[str, Any]:
     return payload
 
 
+def _remote_body(remote: Any) -> dict[str, Any]:
+    try:
+        body = json.loads(getattr(remote, "body", None) or "")
+    except (TypeError, ValueError):
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _redacted_body_matches(raw: Any, payload: dict[str, Any]) -> bool:
+    # QStash hashes the exact bytes sent, including JSON whitespace/key order.
+    digest = hashlib.sha256(json.dumps(payload).encode()).hexdigest()
+    return bool(raw == f"REDACTED:{digest}")
+
+
+def _validate_bindings(
+    planned: list[tuple[ScheduleSpec, str]],
+    remote_by_id: dict[str, Any],
+    namespace: str,
+    destination: str,
+) -> None:
+    """Reject identity/ownership conflicts for the entire batch before writes.
+
+    Local bindings survive a failed remote push; remote bindings survive a
+    lost local database. Neither schedule names nor task names alone establish
+    ownership. An unclaimed legacy schedule also needs this environment's
+    exact webhook destination and the explicitly declared task.
+    """
+    for spec, schedule_id in planned:
+        owner = {"namespace": namespace, "key": spec.key}
+        bound = TaskSchedule.objects.filter(
+            reconciliation_namespace=namespace, reconciliation_key=spec.key
+        ).first()
+        if bound is not None and bound.schedule_id != schedule_id:
+            raise ValueError(
+                f"Schedule {spec.key!r} is already bound to {bound.schedule_id!r}; "
+                "keep its existing_schedule_id mapping"
+            )
+        local = TaskSchedule.objects.filter(schedule_id=schedule_id).first()
+        local_owner = (
+            {
+                "namespace": local.reconciliation_namespace,
+                "key": local.reconciliation_key,
+            }
+            if local is not None and local.reconciliation_namespace is not None
+            else None
+        )
+        if local_owner is not None and local_owner != owner:
+            raise ValueError(f"Schedule {schedule_id!r} belongs to {local_owner!r}")
+        for remote_id, entry in remote_by_id.items():
+            if (
+                _remote_body(entry).get(SCHEDULE_OWNER_KEY) == owner
+                and remote_id != schedule_id
+            ):
+                raise ValueError(
+                    f"Schedule {spec.key!r} is already bound remotely to {remote_id!r}"
+                )
+        remote = remote_by_id.get(schedule_id)
+        body = _remote_body(remote)
+        if SCHEDULE_OWNER_KEY in body and body[SCHEDULE_OWNER_KEY] != owner:
+            raise ValueError(f"Schedule {schedule_id!r} has a conflicting remote owner")
+        if spec.existing_schedule_id is None:
+            # A redacted body hides its owner. Without a local binding we cannot
+            # prove a new deterministic ID would not duplicate that existing job.
+            for remote_id, entry in remote_by_id.items():
+                if (
+                    remote_id != schedule_id
+                    and getattr(entry, "destination", None) == destination
+                    and str(getattr(entry, "body", "")).startswith("REDACTED:")
+                    and not TaskSchedule.objects.filter(
+                        schedule_id=remote_id,
+                        reconciliation_namespace__isnull=False,
+                        reconciliation_key__isnull=False,
+                    ).exists()
+                ):
+                    raise ValueError(
+                        f"Ambiguous redacted schedule {remote_id!r}; restore its "
+                        "local ownership binding or explicitly adopt it first"
+                    )
+            continue
+        deterministic_id = schedule_id_for(namespace, spec.key)
+        if (
+            deterministic_id in remote_by_id
+            or TaskSchedule.objects.filter(schedule_id=deterministic_id).exists()
+        ):
+            raise ValueError(
+                f"Ambiguous mapping: {deterministic_id!r} already exists alongside "
+                f"{schedule_id!r}"
+            )
+        if remote is None:
+            raise ValueError(
+                f"Cannot adopt missing schedule {schedule_id!r}; "
+                "existing_schedule_id never creates a replacement"
+            )
+        if getattr(remote, "destination", None) != destination:
+            raise ValueError(
+                f"Schedule {schedule_id!r} has another environment's destination; "
+                "adoption requires the current webhook URL to match exactly"
+            )
+        if body.get(SCHEDULE_OWNER_KEY) != owner and local_owner != owner:
+            task = _normalize_task_reference(spec.task)
+            remote_task = f"{body.get('module', '')}.{body.get('function', '')}"
+            verified_legacy_body = local is not None and _redacted_body_matches(
+                getattr(remote, "body", None), prepare_qstash_payload(local)
+            )
+            if (remote_task != task and not verified_legacy_body) or (
+                local is not None and local.task != task
+            ):
+                raise ValueError(
+                    f"Schedule {schedule_id!r} task does not match the declaration; "
+                    "adopt the existing task before changing it"
+                )
+
+
 def _remote_drift(remote: Any, instance: TaskSchedule, destination: str) -> list[str]:
     if remote is None:
         return ["missing in QStash"]
@@ -274,7 +393,10 @@ def _remote_drift(remote: Any, instance: TaskSchedule, destination: str) -> list
         body = json.loads(getattr(remote, "body", None) or "")
     except (TypeError, ValueError):
         body = None
-    if body != _jsonable(_reconciled_payload(instance)):
+    payload = _reconciled_payload(instance)
+    if body != _jsonable(payload) and not _redacted_body_matches(
+        getattr(remote, "body", None), payload
+    ):
         drift.append("payload")
     if bool(getattr(remote, "paused", False)) != (not instance.is_active):
         drift.append("paused" if instance.is_active else "active")
@@ -312,29 +434,39 @@ def reconcile_schedules(
 
     The result is returned, never raised: inspect ``result.ok`` /
     ``result.failed``. Configuration errors (missing namespace, invalid or
-    duplicate keys, no callback domain) raise before anything is written.
+    duplicate keys/IDs, ownership conflicts, no callback domain) raise before
+    anything is written. Explicit ``existing_schedule_id`` mappings require a
+    matching remote destination and are retained across future runs.
     """
     ns = _resolve_namespace(namespace)
     destination = get_callback_url()
 
     planned: list[tuple[ScheduleSpec, str]] = []
     seen: set[str] = set()
+    seen_ids: set[str] = set()
     for raw in specs:
         spec = ScheduleSpec.coerce(raw)
         schedule_id = schedule_id_for(ns, spec.key)
-        if schedule_id in seen:
+        if spec.key in seen:
             raise ValueError(f"Duplicate schedule key {spec.key!r}")
-        seen.add(schedule_id)
+        seen.add(spec.key)
+        if spec.existing_schedule_id is not None:
+            if type(spec.existing_schedule_id) is not str or not _EXISTING_ID.fullmatch(
+                spec.existing_schedule_id
+            ):
+                raise ValueError(
+                    "existing_schedule_id must be a provider-generated scd_ id"
+                )
+            schedule_id = spec.existing_schedule_id
+        if schedule_id in seen_ids:
+            raise ValueError(f"Duplicate schedule id {schedule_id!r}")
+        seen_ids.add(schedule_id)
         planned.append((spec, schedule_id))
 
     result = ReconcileResult(namespace=ns, destination=destination, dry_run=dry_run)
 
     try:
-        remote_by_id = {
-            s.schedule_id: s
-            for s in qstash_client.schedule.list()
-            if str(getattr(s, "schedule_id", "")).startswith(f"{ns}.")
-        }
+        remote_by_id = {s.schedule_id: s for s in qstash_client.schedule.list()}
     except Exception as exc:
         logger.exception("Failed to list QStash schedules for reconciliation")
         for spec, schedule_id in planned:
@@ -348,12 +480,29 @@ def reconcile_schedules(
             )
         return result
 
+    try:
+        _validate_bindings(planned, remote_by_id, ns, destination)
+    except ValueError:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to check schedule ownership")
+        result.outcomes = [
+            ScheduleOutcome(
+                key=spec.key,
+                schedule_id=schedule_id,
+                action="failed",
+                error=str(exc),
+            )
+            for spec, schedule_id in planned
+        ]
+        return result
     for spec, schedule_id in planned:
         result.outcomes.append(
             _reconcile_one(
                 spec,
                 schedule_id,
                 remote_by_id.get(schedule_id),
+                namespace=ns,
                 destination=destination,
                 dry_run=dry_run,
                 resync=resync,
@@ -367,6 +516,7 @@ def _reconcile_one(
     schedule_id: str,
     remote: Any,
     *,
+    namespace: str,
     destination: str,
     dry_run: bool,
     resync: bool,
@@ -387,8 +537,17 @@ def _reconcile_one(
             for name, value in desired.items():
                 setattr(instance, name, value)
 
+        binding_changed = (
+            instance.reconciliation_namespace != namespace
+            or instance.reconciliation_key != spec.key
+        )
+        instance.reconciliation_namespace = namespace
+        instance.reconciliation_key = spec.key
+        instance.task_name = desired["task"]
         outcome.remote_drift = _remote_drift(remote, instance, destination)
-        if outcome.action == "unchanged" and (outcome.remote_drift or resync):
+        if outcome.action == "unchanged" and (
+            outcome.remote_drift or resync or binding_changed
+        ):
             outcome.action = "resynced"
             if not outcome.remote_drift:
                 outcome.remote_drift = ["forced resync"]
@@ -411,8 +570,17 @@ def _reconcile_one(
         return outcome
 
     try:
-        if planned_action in ("created", "changed"):
+        if planned_action in ("created", "changed") or binding_changed:
             with remote_sync_suppressed(), transaction.atomic():
+                if instance.pk is not None:
+                    locked = TaskSchedule.objects.select_for_update().get(
+                        pk=instance.pk
+                    )
+                    if locked.reconciliation_namespace is not None and (
+                        locked.reconciliation_namespace != namespace
+                        or locked.reconciliation_key != spec.key
+                    ):
+                        raise ValueError("Schedule ownership changed while reconciling")
                 instance.save()
             outcome.local_saved = True
     except Exception as exc:

@@ -51,6 +51,12 @@ class TaskSchedule(models.Model):
         help_text="The schedule ID stored in QStash",
         db_index=True,
     )
+    reconciliation_namespace = models.CharField(
+        max_length=100, null=True, blank=True, editable=False
+    )
+    reconciliation_key = models.CharField(
+        max_length=100, null=True, blank=True, editable=False
+    )
     name = models.CharField(
         max_length=200,
         verbose_name="Name",
@@ -179,6 +185,14 @@ class TaskSchedule(models.Model):
     paused_at = models.DateTimeField(null=True, blank=True)
     is_resumed = models.BooleanField(default=False)
     resumed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("reconciliation_namespace", "reconciliation_key"),
+                name="qstash_unique_schedule_binding",
+            ),
+        ]
 
     def __str__(self) -> str:
         return self.name or self.task_name or self.task

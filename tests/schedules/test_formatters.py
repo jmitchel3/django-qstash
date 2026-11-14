@@ -12,6 +12,15 @@ from django_qstash.schedules.models import TaskSchedule
 
 @pytest.mark.django_db
 class TestFormatters:
+    def test_ordinary_sync_preserves_reconciler_ownership(self, task_schedule):
+        task_schedule.reconciliation_namespace = "prod"
+        task_schedule.reconciliation_key = "nightly"
+        payload = json.loads(format_task_schedule_for_qstash(task_schedule)["body"])
+        assert payload["_qstash_schedule_owner"] == {
+            "namespace": "prod",
+            "key": "nightly",
+        }
+
     def test_prepare_qstash_payload(self, task_schedule: TaskSchedule):
         """Test preparing task payload for QStash"""
         # Setup a task schedule
