@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -11,10 +12,12 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db.models.signals import post_save
 
+from django_qstash.schedules.formatters import format_task_schedule_for_qstash
 from django_qstash.schedules.models import TaskSchedule
 from django_qstash.schedules.reconcile import ScheduleSpec
 from django_qstash.schedules.reconcile import reconcile_schedules
 from django_qstash.schedules.reconcile import schedule_id_for
+from django_qstash.schedules.services import remote_sync_suppressed
 from django_qstash.schedules.signals import sync_schedule_to_qstash_receiver
 
 DEST = "https://example.com/qstash/webhook/"
@@ -94,6 +97,17 @@ def specs(**overrides):
     }
     base.update(overrides)
     return [ScheduleSpec(**base)]
+
+
+def seed_existing(qstash, schedule_id="scd_legacy", **overrides):
+    with remote_sync_suppressed():
+        row = TaskSchedule.objects.create(
+            schedule_id=schedule_id, **specs(**overrides)[0].local_fields()
+        )
+    qstash.create(**format_task_schedule_for_qstash(row))
+    qstash.calls.clear()
+    qstash.requests.clear()
+    return row
 
 
 @pytest.mark.django_db
@@ -192,34 +206,250 @@ class TestReconcile:
             ("redact", {"body": True}),
         ],
     )
-    @pytest.mark.parametrize("remove_option", [False, True])
+    @pytest.mark.parametrize("mode", ["add", "change", "remove"])
+    @pytest.mark.parametrize("adopt", [False, True])
     def test_failed_delivery_option_update_is_repaired(
-        self, qstash, field, value, remove_option
+        self, qstash, field, value, mode, adopt
     ):
-        original = specs(**{field: value}) if remove_option else specs()
-        desired = specs() if remove_option else specs(**{field: value})
+        original = specs(**{field: value}) if mode != "add" else specs()
+        if mode == "change":
+            value = (
+                value + "/changed"
+                if isinstance(value, str)
+                else (
+                    {"key": "changed", "parallelism": 1}
+                    if field == "flow_control"
+                    else (
+                        {"header": ["X-Secret"]}
+                        if field == "redact"
+                        else {"X-Changed": "changed"}
+                    )
+                )
+            )
+        desired = specs() if mode == "remove" else specs(**{field: value})
+        schedule_id = "prod.nightly-report"
+        if adopt:
+            seed_existing(qstash)
+            schedule_id = "scd_legacy"
+            original = [replace(original[0], existing_schedule_id=schedule_id)]
+            desired = [replace(desired[0], existing_schedule_id=schedule_id)]
         assert reconcile_schedules(original, namespace="prod").ok
-        old_body = qstash.store["prod.nightly-report"].body
+        old_body = qstash.store[schedule_id].body
 
         qstash.fail_create = True
         failed = reconcile_schedules(desired, namespace="prod")
         assert not failed.ok
         assert failed.outcomes[0].local_saved
-        assert qstash.store["prod.nightly-report"].body == old_body
+        assert qstash.store[schedule_id].body == old_body
 
         qstash.fail_create = False
         repaired = reconcile_schedules(desired, namespace="prod")
         assert repaired.outcomes[0].action == "resynced"
         assert repaired.outcomes[0].remote_drift == ["payload"]
-        if remove_option:
+        if mode == "remove":
             assert field not in qstash.requests[-1]
         else:
             assert qstash.requests[-1][field] == value
-        new_body = qstash.store["prod.nightly-report"].body
+        new_body = qstash.store[schedule_id].body
         assert new_body != old_body
         assert "private-" not in new_body
         assert reconcile_schedules(desired, namespace="prod").counts()["unchanged"] == 1
         assert len(qstash.requests) == 2
+        assert set(qstash.store) == {schedule_id}
+
+    @pytest.mark.parametrize("local_exists", [False, True])
+    def test_adopt_existing_id_and_repeat(self, qstash, live_signals, local_exists):
+        row = seed_existing(qstash)
+        if not local_exists:
+            TaskSchedule.objects.all()._raw_delete("default")
+        declared = specs(existing_schedule_id="scd_legacy")
+        first = reconcile_schedules(declared, namespace="prod")
+        assert first.ok
+        adopted = TaskSchedule.objects.get()
+        if local_exists:
+            assert adopted.pk == row.pk
+        assert adopted.schedule_id == "scd_legacy"
+        assert adopted.reconciliation_namespace == "prod"
+        assert adopted.reconciliation_key == "nightly-report"
+        assert set(qstash.store) == {"scd_legacy"}
+        assert qstash.calls == [("create", "scd_legacy")]
+        assert (
+            reconcile_schedules(declared, namespace="prod").counts()["unchanged"] == 1
+        )
+        assert len(qstash.calls) == 1
+        live_signals.schedule.create.assert_not_called()
+
+    def test_adoption_dry_run_has_no_writes(self, qstash):
+        seed_existing(qstash)
+        before = list(TaskSchedule.objects.values())
+        body = qstash.store["scd_legacy"].body
+        declared = specs(existing_schedule_id="scd_legacy")
+        dry = reconcile_schedules(declared, namespace="prod", dry_run=True)
+        assert dry.ok
+        assert dry.outcomes[0].action == "resynced"
+        assert list(TaskSchedule.objects.values()) == before
+        assert qstash.store["scd_legacy"].body == body
+        assert qstash.calls == []
+
+    @pytest.mark.parametrize("dry_run", [False, True])
+    @pytest.mark.parametrize(
+        "conflict",
+        [
+            "destination",
+            "remote-task",
+            "local-task",
+            "missing",
+            "remote-owner",
+            "local-owner",
+            "deterministic-local",
+            "deterministic-remote",
+            "malformed",
+        ],
+    )
+    def test_adoption_rejects_unsafe_mapping_before_any_writes(
+        self, qstash, dry_run, conflict
+    ):
+        row = seed_existing(qstash)
+        remote = qstash.store["scd_legacy"]
+        if conflict == "destination":
+            remote.destination = "https://stage.example.com/qstash/webhook/"
+        elif conflict == "remote-task":
+            remote.body = json.dumps({"module": "other.tasks", "function": "nightly"})
+        elif conflict == "local-task":
+            TaskSchedule.objects.filter(pk=row.pk).update(task="other.tasks.nightly")
+        elif conflict == "missing":
+            qstash.store.clear()
+        elif conflict == "remote-owner":
+            body = json.loads(remote.body)
+            body["_qstash_schedule_owner"] = {
+                "namespace": "stage",
+                "key": "nightly-report",
+            }
+            remote.body = json.dumps(body)
+        elif conflict == "local-owner":
+            TaskSchedule.objects.filter(pk=row.pk).update(
+                reconciliation_namespace="stage", reconciliation_key="nightly-report"
+            )
+        elif conflict == "deterministic-local":
+            TaskSchedule.objects.create(
+                schedule_id="prod.nightly-report", **specs()[0].local_fields()
+            )
+        elif conflict == "deterministic-remote":
+            qstash.store["prod.nightly-report"] = SimpleNamespace(
+                schedule_id="prod.nightly-report"
+            )
+        else:
+            remote.body = "[]"
+        before = list(TaskSchedule.objects.values())
+        with pytest.raises(ValueError):
+            reconcile_schedules(
+                specs(key="valid-new-job") + specs(existing_schedule_id="scd_legacy"),
+                namespace="prod",
+                dry_run=dry_run,
+            )
+        assert list(TaskSchedule.objects.values()) == before
+        assert qstash.calls == []
+
+    @pytest.mark.parametrize("dry_run", [False, True])
+    @pytest.mark.parametrize("ids", [("scd_one", "scd_two"), ("scd_one", "scd_one")])
+    def test_duplicate_keys_rejected_even_with_distinct_ids(self, qstash, dry_run, ids):
+        with pytest.raises(ValueError, match="Duplicate schedule key"):
+            reconcile_schedules(
+                specs(existing_schedule_id=ids[0]) + specs(existing_schedule_id=ids[1]),
+                namespace="prod",
+                dry_run=dry_run,
+            )
+        assert qstash.calls == []
+
+    @pytest.mark.parametrize("dry_run", [False, True])
+    def test_duplicate_existing_ids_rejected(self, qstash, dry_run):
+        with pytest.raises(ValueError, match="Duplicate schedule id"):
+            reconcile_schedules(
+                specs(key="one", existing_schedule_id="scd_one")
+                + specs(key="two", existing_schedule_id="scd_one"),
+                namespace="prod",
+                dry_run=dry_run,
+            )
+        assert qstash.calls == []
+
+    @pytest.mark.parametrize(
+        "invalid", ["", "prod.job", "stage.job", "scd_", "scd_x\n", 12]
+    )
+    def test_invalid_existing_id(self, qstash, invalid):
+        with pytest.raises(ValueError, match="existing_schedule_id"):
+            reconcile_schedules(specs(existing_schedule_id=invalid), namespace="prod")
+        assert qstash.calls == []
+
+    @pytest.mark.parametrize("local_exists", [False, True])
+    @pytest.mark.parametrize("replacement", [None, "scd_other"])
+    def test_adoption_mapping_cannot_be_removed_or_changed(
+        self, qstash, local_exists, replacement
+    ):
+        seed_existing(qstash)
+        assert reconcile_schedules(
+            specs(existing_schedule_id="scd_legacy"), namespace="prod"
+        ).ok
+        if not local_exists:
+            TaskSchedule.objects.all()._raw_delete("default")
+        qstash.calls.clear()
+        with pytest.raises(ValueError, match="already bound"):
+            reconcile_schedules(
+                specs(existing_schedule_id=replacement), namespace="prod"
+            )
+        assert qstash.calls == []
+        assert set(qstash.store) == {"scd_legacy"}
+
+    def test_failed_initial_adoption_retains_binding_and_recovers(self, qstash):
+        row = seed_existing(qstash)
+        declared = specs(existing_schedule_id="scd_legacy", headers={"X-New": "yes"})
+        qstash.fail_create = True
+        failed = reconcile_schedules(declared, namespace="prod")
+        assert failed.failed[0].local_saved
+        row.refresh_from_db()
+        assert row.reconciliation_namespace == "prod"
+        with pytest.raises(ValueError, match="already bound"):
+            reconcile_schedules(specs(), namespace="prod")
+        qstash.fail_create = False
+        assert reconcile_schedules(declared, namespace="prod").counts()["resynced"] == 1
+        assert (
+            reconcile_schedules(declared, namespace="prod").counts()["unchanged"] == 1
+        )
+        assert set(qstash.store) == {"scd_legacy"}
+
+    def test_two_environments_adopt_only_their_explicit_ids(self, qstash, settings):
+        seed_existing(qstash, "scd_stage")
+        seed_existing(qstash, "scd_prod")
+        qstash.store["scd_stage"].destination = (
+            "https://stage.example.com/qstash/webhook/"
+        )
+        settings.DJANGO_QSTASH_DOMAIN = "stage.example.com"
+        stage = specs(existing_schedule_id="scd_stage")
+        assert reconcile_schedules(stage, namespace="stage").ok
+        stage_body = qstash.store["scd_stage"].body
+        settings.DJANGO_QSTASH_DOMAIN = "example.com"
+        prod = specs(existing_schedule_id="scd_prod")
+        assert reconcile_schedules(prod, namespace="prod").ok
+        assert reconcile_schedules(prod, namespace="prod").counts()["unchanged"] == 1
+        assert qstash.store["scd_stage"].body == stage_body
+        assert set(qstash.store) == {"scd_stage", "scd_prod"}
+
+    def test_adopted_task_can_change_after_ownership_is_established(self, qstash):
+        seed_existing(qstash)
+        declared = specs(existing_schedule_id="scd_legacy")
+        assert reconcile_schedules(declared, namespace="prod").ok
+        changed = [replace(declared[0], task="reports.tasks.weekly")]
+        assert reconcile_schedules(changed, namespace="prod").ok
+        assert reconcile_schedules(changed, namespace="prod").counts()["unchanged"] == 1
+
+    def test_adopted_missing_remote_is_never_recreated(self, qstash):
+        seed_existing(qstash)
+        declared = specs(existing_schedule_id="scd_legacy")
+        assert reconcile_schedules(declared, namespace="prod").ok
+        qstash.store.clear()
+        qstash.calls.clear()
+        with pytest.raises(ValueError, match="missing schedule"):
+            reconcile_schedules(declared, namespace="prod")
+        assert qstash.calls == []
 
     def test_legacy_payload_gets_one_resync(self, qstash):
         reconcile_schedules(specs(), namespace="prod")
@@ -353,14 +583,21 @@ class TestReconcile:
         ],
     )
     @pytest.mark.parametrize("existing", [False, True])
-    def test_dry_run_validates_like_apply(self, qstash, invalid, existing):
+    @pytest.mark.parametrize("adopt", [False, True])
+    def test_dry_run_validates_like_apply(self, qstash, invalid, existing, adopt):
+        mapping = {}
+        if adopt:
+            seed_existing(qstash)
+            mapping = {"existing_schedule_id": "scd_legacy"}
         if existing:
-            reconcile_schedules(specs(), namespace="prod")
+            reconcile_schedules(specs(**mapping), namespace="prod")
         calls_before = list(qstash.calls)
         rows_before = list(TaskSchedule.objects.values())
 
-        dry = reconcile_schedules(specs(**invalid), namespace="prod", dry_run=True)
-        applied = reconcile_schedules(specs(**invalid), namespace="prod")
+        dry = reconcile_schedules(
+            specs(**invalid, **mapping), namespace="prod", dry_run=True
+        )
+        applied = reconcile_schedules(specs(**invalid, **mapping), namespace="prod")
 
         assert not dry.ok
         assert dry.outcomes[0].action == "failed"

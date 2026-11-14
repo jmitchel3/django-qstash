@@ -252,28 +252,39 @@ def test_delivery_options_captured_at_call_time(mock_qstash_client):
     headers = {"X-Group": "original"}
     callback_headers = {"X-Callback": "original"}
     flow_control = {"key": "original", "parallelism": 1}
+    failure_headers = {"X-Failure": "original"}
+    redact = {"header": ["Authorization"]}
     with transaction.atomic():
         add.apply_async_on_commit(
             args=(1, 2),
             headers=headers,
             callback_headers=callback_headers,
             flow_control=flow_control,
+            failure_callback_headers=failure_headers,
+            redact=redact,
         )
         headers["X-Group"] = "changed"
         callback_headers.clear()
         flow_control["parallelism"] = 99
+        failure_headers.clear()
+        redact["header"].append("X-New")
     sent = mock_qstash_client.message.publish_json.call_args.kwargs
     assert sent["headers"] == {"X-Group": "original"}
     assert sent["callback_headers"] == {"X-Callback": "original"}
     assert sent["flow_control"] == {"key": "original", "parallelism": 1}
+    assert sent["failure_callback_headers"] == {"X-Failure": "original"}
+    assert sent["redact"] == {"header": ["Authorization"]}
 
 
-def test_link_signatures_captured_at_call_time(mock_qstash_client):
+@pytest.mark.parametrize(
+    "container", [lambda links: links, tuple, lambda links: links[0]]
+)
+def test_link_signatures_captured_at_call_time(mock_qstash_client, container):
     signature = add.s({"items": [1]}, y={"labels": ["original"]})
     signature.options["headers"] = {"X-Group": "original"}
     links = [signature]
     with transaction.atomic():
-        add.apply_async_on_commit(args=(1, 2), link=links)
+        add.apply_async_on_commit(args=(1, 2), link=container(links))
         signature.args[0]["items"].append(2)
         signature.kwargs["y"]["labels"].clear()
         signature.options["headers"]["X-Group"] = "changed"

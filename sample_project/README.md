@@ -137,3 +137,13 @@ mode:
 
 The signing keys and token are the fixed values printed by `qstash dev`; they
 are safe to commit **for local development only**.
+
+### Schedule adoption smoke test
+
+Run `uv run python manage.py qstash_schedule_smoke_test` with the same QStash
+credentials and callback domain as the round-trip smoke test. It creates one
+new provider-generated schedule, pauses it, adopts its ID, injects a failed
+update, and verifies recovery and option removal against the real API. Repeated
+runs must be unchanged and the ID must remain stable. The command deletes only
+its own temporary schedule in a `finally` block. The live E2E/release workflow
+runs both smoke commands against an isolated CI database and tunnel.

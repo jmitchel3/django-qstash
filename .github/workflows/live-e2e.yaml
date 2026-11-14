@@ -118,6 +118,12 @@ jobs:
           DJANGO_QSTASH_DOMAIN: ${{ steps.tunnel.outputs.url }}
         run: uv run python manage.py qstash_smoke_test --timeout 90
 
+      - name: Schedule adoption and recovery smoke test
+        timeout-minutes: 3
+        env:
+          DJANGO_QSTASH_DOMAIN: ${{ steps.tunnel.outputs.url }}
+        run: uv run python manage.py qstash_schedule_smoke_test
+
       - name: Logs
         if: always()
         timeout-minutes: 1

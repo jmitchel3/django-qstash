@@ -1233,15 +1233,54 @@ with the same defaults. Every field is compared on each run, so changing a
 default or a value in your spec updates existing schedules. Dicts with the same
 keys are accepted in place of `ScheduleSpec`.
 
-**Identity.** The QStash schedule id is `"<namespace>.<key>"` and is set by
+**Identity.** By default the QStash schedule id is `"<namespace>.<key>"` and is set by
 django-qstash when the schedule is created (QStash treats a create with an
 existing id as an update). Repeat runs, and runs after a partial failure, update
 the same schedule and the same local row; they never create duplicates.
 
+**Adopting existing IDs (0.10.0+).** Set
+`ScheduleSpec(existing_schedule_id="scd_...")` (or the equivalent dict key) to
+explicitly bind a declaration to a provider-generated ID. Run
+`python manage.py migrate` first to install the schedule ownership migration.
+Adoption updates that ID in place using QStash's create/update endpoint,
+preserving the local row's primary key when it exists. It never
+deletes/recreates the schedule or falls back to a deterministic ID. A missing
+adopted remote schedule is an error.
+
+```python
+ScheduleSpec(
+    key="daily-adoption-metrics",
+    existing_schedule_id="scd_6MwL9ApSDRJY1BzQDQR4acjhXuDV",  # RangerTrac stage
+    task="access.tasks.aggregate_adoption_metrics",
+    cron="45 4 * * *",
+)
+```
+
+The remote destination must exactly match the current environment's webhook
+URL on every adoption run. On the first run, the remote task path and any
+existing local row's task must also match the declaration. After ownership is
+established, the declaration may change the task. Names are never ownership
+evidence. A remote schedule with no local row can be adopted under these same
+checks. Keep distinct webhook URLs and namespaces for environments sharing an
+account, and refresh the ID inventory before migrating.
+
+Ownership is persisted as `TaskSchedule.reconciliation_namespace` and
+`reconciliation_key`, and as reserved `_qstash_schedule_owner` payload metadata.
+The local binding survives a failed remote update; the remote binding protects
+against remapping after a local database loss. Keep `existing_schedule_id` in
+future declarations: removing/changing it or renaming the key is rejected once
+bound. Duplicate keys/IDs, conflicting local or remote owners, a pre-existing
+deterministic schedule for the same key, and destination/task mismatches are
+rejected before **any** batch writes, including in dry runs. Ownership fields
+are maintained by reconciliation and are not editable in the admin.
+
 **Environments.** The namespace (`namespace=` or
 `DJANGO_QSTASH_SCHEDULE_NAMESPACE`, required) keeps environments apart when
-they share a QStash account. A run only reads and writes ids with its own
-prefix, so stage and production cannot alter each other.
+they share a QStash account. Reconciliation reads the account's schedule list
+to check ownership, but only writes IDs declared in this namespace, including
+explicit adopted IDs that pass the checks above. Namespace/key bindings are
+unique in the database. Serialize reconciliation deploy steps for an environment;
+QStash does not offer an atomic cross-database ownership claim.
 
 **Domain moves.** On every run the remote schedule is compared with the local
 row: destination (the current callback URL), cron, retries, task payload, and
@@ -1250,6 +1289,10 @@ as `resynced`. Changing `DJANGO_QSTASH_DOMAIN` or `DJANGO_QSTASH_WEBHOOK_PATH`
 therefore converges on the next run while keeping the schedule id. Headers,
 callbacks, and flow control are not compared remotely; pass `resync=True`
 (`--resync`) to push everything after editing those directly in QStash.
+For adopted IDs, a destination mismatch fails closed even with `--resync`;
+coordinate a deliberate provider destination change separately before running
+against a new domain. This prevents an incorrectly configured environment from
+moving another environment's existing schedule.
 
 **Retrying failed updates.** Reconciled payloads contain a fingerprint of all
 spec-controlled fields. This records which specification reached QStash, so a
@@ -1278,10 +1321,10 @@ the QStash call atomic.
   remote drift, and pushes again.
 - Listing QStash schedules fails: every entry is `failed` and nothing is written.
 
-Configuration problems (missing namespace, invalid or duplicate keys, missing
-callback domain) raise before anything is written.
+Configuration problems (missing namespace, invalid or duplicate keys/IDs,
+ownership conflicts, missing callback domain) raise before anything is written.
 
-**Scope.** Only ids generated from your specs are touched. Schedules missing
+**Scope.** Only IDs generated from or explicitly mapped in your specs are touched. Schedules missing
 from the specs (including ones you removed) are not deleted, and unrelated
 schedules, local or remote, are never adopted or modified.
 

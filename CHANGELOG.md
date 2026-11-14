@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.0] - 2026-11-13
+
+### Added
+
+- `ScheduleSpec(existing_schedule_id="scd_...")` explicitly adopts an existing
+  provider-generated schedule ID without creating a duplicate or replacing it.
+  New schedules retain deterministic `<namespace>.<key>` IDs.
+- Persistent namespace/key ownership in the local database and remote payload.
+  Adoption validates the exact environment webhook and initial task identity,
+  rejects duplicate/ambiguous mappings and conflicting owners, and prevents
+  removing a mapping from silently creating a second job. Names are never used
+  to infer ownership. Missing adopted schedules fail rather than being recreated.
+- Migration examples for stage/production adoption and a real-QStash schedule
+  smoke test covering adoption, failed-update repair, option removal, stable IDs,
+  idempotence, and cleanup of isolated test resources.
+
+### Upgrade notes
+
+- Run `python manage.py migrate` before reconciling to add schedule ownership
+  fields and their unique constraint. Existing schedules get ownership metadata
+  on their next reconciliation. Keep adopted ID mappings in all future declarations.
+- Adopted schedules require a matching destination on every run, including
+  `--resync`. Coordinate deliberate domain moves separately.
+- Includes the transaction snapshot and delivery-option recovery fixes from
+  0.9.2, with expanded regression coverage for adopted schedules and nested options.
+
 ## [0.9.2] - 2026-11-13
 
 ### Fixed
