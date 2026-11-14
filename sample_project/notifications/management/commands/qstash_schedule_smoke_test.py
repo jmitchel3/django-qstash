@@ -95,14 +95,13 @@ class Command(BaseCommand):
                     == 1,
                     "repair",
                 )
-                self.require(
-                    reconcile_schedules([desired], namespace=namespace).counts()[
-                        "unchanged"
-                    ]
-                    == 1,
-                    "repair idempotence",
-                )
+                repeated = reconcile_schedules([desired], namespace=namespace)
                 remote = qstash_client.schedule.get(schedule_id)
+                self.require(
+                    repeated.counts()["unchanged"] == 1,
+                    f"repair idempotence: {repeated.to_dict()!r}; "
+                    f"temporary remote body={remote.body!r}",
+                )
                 self.require(
                     remote.schedule_id == schedule_id,
                     "schedule identity changed",
